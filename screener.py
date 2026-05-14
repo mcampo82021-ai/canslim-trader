@@ -374,6 +374,8 @@ def main():
             path    = guardar_reporte(ticker, reporte)
 
             print(f"\n{reporte}")
+            from alerts import enviar_telegram
+            enviar_telegram(f"*{ticker}*\n{reporte[:3000]}")
             resultados.append({"ticker": ticker, "ok": True, "path": path})
 
         except Exception as e:
