@@ -1,0 +1,610 @@
+"""
+screener_sp500.py — CAN SLIM Mass Screener (S&P 500 + Russell 2000)
+Descarga los índices desde Wikipedia, aplica los 4 filtros CAN SLIM
+y exporta los ganadores a Excel. Sin Telegram — usa screener.py para tickers individuales.
+
+Uso:
+    python3 screener_sp500.py                          # Russell 2000 + mid caps (default)
+    python3 screener_sp500.py --universo sp500         # Solo S&P 500
+    python3 screener_sp500.py --universo russell2000   # Solo Russell 2000
+    python3 screener_sp500.py --universo ambos         # S&P 500 + Russell 2000 (~2500 tickers)
+    python3 screener_sp500.py --test 10                # Modo test: primeros N tickers
+    python3 screener_sp500.py --resume                 # Retoma desde donde se interrumpió
+
+Requisitos:
+    pip3 install yfinance anthropic python-dotenv openpyxl pandas requests lxml
+
+Configuración (.env):
+    ANTHROPIC_API_KEY=sk-ant-...
+    TELEGRAM_BOT_TOKEN=...
+    TELEGRAM_CHAT_ID=...
+"""
+
+import sys
+import json
+import os
+import time
+import argparse
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Dependencias ──────────────────────────────────────────────────────────────
+try:
+    import yfinance as yf
+except ImportError:
+    print("❌ Falta yfinance. Ejecuta: pip3 install yfinance")
+    sys.exit(1)
+
+try:
+    import anthropic
+except ImportError:
+    print("❌ Falta anthropic. Ejecuta: pip3 install anthropic")
+    sys.exit(1)
+
+try:
+    import pandas as pd
+except ImportError:
+    print("❌ Falta pandas. Ejecuta: pip3 install pandas lxml")
+    sys.exit(1)
+
+try:
+    import openpyxl
+except ImportError:
+    print("❌ Falta openpyxl. Ejecuta: pip3 install openpyxl")
+    sys.exit(1)
+
+# Importa las funciones originales de screener.py (sin modificarlas)
+try:
+    from screener import extraer_datos, construir_prompt, analizar_con_claude, guardar_reporte, calcular_market_direction, evaluar_filtros
+except ImportError:
+    print("❌ No se encontró screener.py en la misma carpeta.")
+    print("   Asegúrate de que screener_sp500.py esté junto a screener.py")
+    sys.exit(1)
+
+try:
+    from alerts import enviar_telegram, enviar_resumen
+except ImportError:
+    print("⚠️  No se encontró alerts.py — las alertas Telegram estarán desactivadas")
+    def enviar_telegram(msg, **kwargs): return False
+    def enviar_resumen(resultados): return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIGURACIÓN
+# ══════════════════════════════════════════════════════════════════════════════
+
+ARCHIVO_PROGRESO  = "sp500_progreso.json"      # Para poder retomar si se interrumpe
+ARCHIVO_GANADORES = "Ganadores_CAN_SLIM.xlsx"  # Excel de salida
+PAUSA_ENTRE_TICKERS = 1.5   # segundos entre tickers (evita ban de yfinance)
+PAUSA_TRAS_ERROR    = 5.0   # segundos extra si hay error de red
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. OBTENER LISTA S&P 500 DESDE WIKIPEDIA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def obtener_tickers_sp500() -> list[str]:
+    """
+    Descarga la lista actualizada del S&P 500 desde Wikipedia.
+    Fallback: lista hardcodeada con los 50 más líquidos si Wikipedia falla.
+    """
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+
+    print("📋 Descargando lista S&P 500 desde Wikipedia...")
+    try:
+        tablas = pd.read_html(url)
+        df = tablas[0]  # Primera tabla = componentes actuales
+
+        # La columna del ticker puede llamarse "Symbol" o "Ticker symbol"
+        col_ticker = None
+        for col in df.columns:
+            if "symbol" in col.lower() or "ticker" in col.lower():
+                col_ticker = col
+                break
+
+        if col_ticker is None:
+            raise ValueError("No se encontró columna de ticker en Wikipedia")
+
+        tickers = df[col_ticker].str.replace(".", "-", regex=False).tolist()
+        tickers = [t.strip() for t in tickers if isinstance(t, str) and t.strip()]
+
+        print(f"✅ {len(tickers)} tickers obtenidos del S&P 500")
+        return tickers
+
+    except Exception as e:
+        print(f"⚠️  Error descargando de Wikipedia: {e}")
+        print("   Usando lista de fallback con los 50 más líquidos...")
+        return _fallback_tickers()
+
+
+def _fallback_tickers() -> list[str]:
+    """Lista de fallback con los 50 tickers más líquidos del S&P 500."""
+    return [
+        "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","BRK-B","JPM",
+        "V","UNH","XOM","LLY","JNJ","AVGO","MA","PG","HD","MRK","ORCL","CVX",
+        "ABBV","COST","ADBE","CRM","AMD","ACN","PEP","NFLX","TMO","MCD","QCOM",
+        "CSCO","INTC","WMT","IBM","GE","DIS","BAC","PYPL","UBER","ABNB","SPOT",
+        "SQ","ROKU","SNOW","PLTR","ZM","SHOP",
+    ]
+
+
+def obtener_tickers_russell2000() -> list[str]:
+    """
+    Construye el universo small cap (proxy Russell 2000) desde NYSE + NASDAQ.
+    Filtra por market cap $300M-$10B (small + mid cap).
+    Fuente: github.com/rreichel3/US-Stock-Symbols (actualizado diariamente).
+    Fallback: lista hardcodeada si la descarga falla.
+    """
+    import requests as req
+
+    urls = [
+        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nyse/nyse_full_tickers.json",
+        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nasdaq/nasdaq_full_tickers.json",
+    ]
+
+    print("📋 Construyendo universo small+mid cap (NYSE + NASDAQ, market cap $300M-$10B)...")
+    try:
+        tickers = []
+        for url in urls:
+            resp = req.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            for item in data:
+                try:
+                    mc     = float(item.get("marketCap", 0) or 0)
+                    symbol = str(item.get("symbol", "")).strip()
+                    # Small + Mid cap: market cap $300M–$10B, ticker válido
+                    if (300_000_000 <= mc <= 10_000_000_000
+                            and symbol.isalpha()
+                            and 1 <= len(symbol) <= 6):
+                        tickers.append(symbol)
+                except Exception:
+                    continue
+
+        # Eliminar duplicados manteniendo orden
+        vistos = set()
+        tickers_unicos = []
+        for t in tickers:
+            if t not in vistos:
+                vistos.add(t)
+                tickers_unicos.append(t)
+
+        if len(tickers_unicos) < 100:
+            raise ValueError(f"Solo se obtuvieron {len(tickers_unicos)} tickers — datos incompletos")
+
+        print(f"✅ {len(tickers_unicos)} tickers encontrados (market cap $300M-$10B)")
+        return tickers_unicos
+
+    except Exception as e:
+        print(f"⚠️  Error construyendo universo small cap: {e}")
+        print("   Usando lista de fallback...")
+        return _fallback_russell2000()
+
+
+def _fallback_russell2000() -> list[str]:
+    """Small/mid caps representativas incluyendo las de tu watchlist."""
+    return [
+        # Tu watchlist actual
+        "ORLA","ERO","RELY","IONQ","ALAB",
+        # Small/mid caps de alto crecimiento conocidas
+        "AXON","CELH","RXRX","RDDT","KVYO","APP","SMAR","TMDX","ASTS","LUNR",
+        "RKLB","ACHR","JOBY","IREN","CIFR","MARA","RIOT","HUT","CLSK","BTBT",
+        "EXAS","NTRA","PCVX","RVMD","KRTX","ARWR","IONS","ALNY","SRPT","RARE",
+        "ENPH","SEDG","FSLR","ARRY","NOVA","SHLS","HASI","CWEN","ORA","GTLS",
+        "FTAI","GATX","GNRC","POWL","AAON","MTDR","CIVI","SM","CHRD","VTLE",
+        "TNET","PAYC","PCTY","VECO","ACLS","ONTO","AMBA","AEHR","FORM","COHU",
+        "CRVL","MGNI","TTD","PUBM","IAS","INTEGRAL","DV","OM","GFAI","RAMP",
+        "ELF","CURV","DSGN","VSCO","CATO","PRGO","USPH","AMED","ADUS","AFCG",
+        "SFIX","WRBY","BIRD","FLNC","PLUG","BLNK","EVGO","CHPT","NXRT","UE",
+        "CTRE","GMRE","MDRR","NREF","BRSP","TPVG","GAIN","MAIN","HTGC","ARCC",
+    ]
+
+
+def obtener_tickers(universo: str) -> list[str]:
+    """
+    Obtiene la lista de tickers según el universo seleccionado.
+    universo: 'sp500', 'russell2000', 'ambos'
+    """
+    if universo == "sp500":
+        return obtener_tickers_sp500()
+    elif universo == "russell2000":
+        return obtener_tickers_russell2000()
+    elif universo == "ambos":
+        sp500   = obtener_tickers_sp500()
+        russell = obtener_tickers_russell2000()
+        # Combinar sin duplicados, manteniendo orden
+        vistos = set(sp500)
+        combinados = sp500 + [t for t in russell if t not in vistos]
+        print(f"📊 Universo combinado: {len(combinados)} tickers únicos")
+        return combinados
+    else:
+        print(f"⚠️  Universo '{universo}' no reconocido — usando russell2000")
+        return obtener_tickers_russell2000()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. PRE-FILTRO RÁPIDO (sin Claude) — ahorra tiempo y tokens
+# ══════════════════════════════════════════════════════════════════════════════
+
+def pasa_filtro1_rapido(datos: dict) -> tuple[bool, str]:
+    """
+    Verifica el Filtro 1 (obligatorio) con los datos ya extraídos.
+    Si falla cualquier criterio, retorna (False, motivo) para hacer continue.
+    Si pasa, retorna (True, "OK") y se procede con Claude.
+
+    Esto evita llamar a Claude API para los ~70-80% de tickers que fallarán F1.
+    """
+    razones_fallo = []
+
+    # ── EPS trimestral YoY ≥25% (campo correcto de screener.py v2.0) ─────────
+    eps_trim = datos.get("eps_trimestral_yoy")
+    if eps_trim is None:
+        razones_fallo.append("EPS trim: sin datos")
+    elif eps_trim < 25:
+        razones_fallo.append(f"EPS trim YoY {eps_trim:.1f}% < 25%")
+
+    # ── EPS Revisions proxy positivo ─────────────────────────────────────────
+    eps_proxy = datos.get("eps_revision_proxy")
+    if eps_proxy != "positivo":
+        razones_fallo.append(f"EPS Revisions: {eps_proxy}")
+
+    # ── SMA50 > SMA200 (tendencia alcista) ────────────────────────────────────
+    tendencia = datos.get("tendencia_alcista")
+    if tendencia is None:
+        razones_fallo.append("SMA: sin datos suficientes")
+    elif not tendencia:
+        sma50  = datos.get("sma50", "?")
+        sma200 = datos.get("sma200", "?")
+        razones_fallo.append(f"SMA50 ({sma50}) < SMA200 ({sma200})")
+
+    # ── Market Direction — no operar en distribución ──────────────────────────
+    if datos.get("mercado_en_distribucion", False):
+        dist = datos.get("distribution_days_25d", "?")
+        razones_fallo.append(f"Mercado en distribución ({dist} dist. days)")
+
+    if razones_fallo:
+        return False, " | ".join(razones_fallo)
+
+    return True, "OK"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. PERSISTENCIA DE PROGRESO (para poder retomar si se interrumpe)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cargar_progreso() -> dict:
+    """Carga el estado del progreso si existe (para --resume)."""
+    if os.path.exists(ARCHIVO_PROGRESO):
+        try:
+            with open(ARCHIVO_PROGRESO, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"procesados": [], "ganadores": []}
+
+
+def guardar_progreso(procesados: list, ganadores: list):
+    """Guarda el estado actual para poder retomar con --resume."""
+    with open(ARCHIVO_PROGRESO, "w", encoding="utf-8") as f:
+        json.dump({"procesados": procesados, "ganadores": ganadores},
+                  f, ensure_ascii=False, indent=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. EXPORTAR EXCEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def exportar_excel(ganadores: list, ruta: str = ARCHIVO_GANADORES):
+    """
+    Exporta los ganadores CAN SLIM a un Excel bien formateado.
+
+    Columnas: Ticker, Empresa, Sector, Precio, RS Rating, Revenue YoY%,
+              ROE%, Net Margin%, FCF Yield%, D/E, Upside%, Veredicto, Fecha
+    """
+    if not ganadores:
+        print("⚠️  No hay ganadores para exportar")
+        return
+
+    filas = []
+    for g in ganadores:
+        d = g.get("datos", {})
+        filas.append({
+            "Ticker":        g["ticker"],
+            "Empresa":       d.get("nombre_empresa", g["ticker"]),
+            "Sector":        d.get("sector", "N/D"),
+            "Industria":     d.get("industria", "N/D"),
+            "Precio ($)":    d.get("precio_actual"),
+            "RS Rating":     d.get("rs_rating_aprox"),
+            "Retorno 1Y (%)": d.get("retorno_1y_ticker"),
+            "Sales Trim YoY (%)": d.get("sales_trimestral_yoy"),
+            "EPS Trim YoY (%)": d.get("eps_trimestral_yoy"),
+            "ROE (%)":       d.get("roic_proxy"),
+            "Net Margin (%)": d.get("net_margin"),
+            "FCF Yield (%)": d.get("fcf_yield"),
+            "FCF/NI (%)":    d.get("fcf_net_income_ratio"),
+            "D/E":           d.get("debt_equity"),
+            "Inst. Ownership (%)": d.get("inst_ownership_pct"),
+            "Target Upside (%)": d.get("target_upside_pct"),
+            "Price Target ($)": d.get("price_target"),
+            "SMA50":         d.get("sma50"),
+            "SMA200":        d.get("sma200"),
+            "Veredicto":     g.get("veredicto", "WATCHLIST"),
+            "Fecha":         d.get("fecha_analisis", datetime.now().strftime("%Y-%m-%d")),
+        })
+
+    df = pd.DataFrame(filas)
+
+    # Ordenar por RS Rating descendente (los mejores primero)
+    df = df.sort_values("RS Rating", ascending=False).reset_index(drop=True)
+
+    with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Ganadores", index=False)
+
+        ws = writer.sheets["Ganadores"]
+
+        # ── Formato: anchos de columna ────────────────────────────────────────
+        anchos = {
+            "A": 8,   # Ticker
+            "B": 30,  # Empresa
+            "C": 20,  # Sector
+            "D": 25,  # Industria
+            "E": 10,  # Precio
+            "F": 10,  # RS Rating
+            "G": 14,  # Retorno 1Y
+            "H": 16,  # Sales Trim YoY
+            "I": 15,  # EPS Trim YoY
+            "J": 10,  # ROE
+            "K": 14,  # Net Margin
+            "L": 12,  # FCF Yield
+            "M": 10,  # FCF/NI
+            "N": 8,   # D/E
+            "O": 20,  # Inst. Ownership
+            "P": 16,  # Target Upside
+            "Q": 14,  # Price Target
+            "R": 10,  # SMA50
+            "S": 10,  # SMA200
+            "T": 48,  # Veredicto
+            "U": 20,  # Fecha
+        }
+        for col_letra, ancho in anchos.items():
+            ws.column_dimensions[col_letra].width = ancho
+
+        # ── Formato: header con fondo oscuro ─────────────────────────────────
+        from openpyxl.styles import PatternFill, Font, Alignment
+
+        header_fill = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True, size=10)
+
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # ── Formato: colores por veredicto ────────────────────────────────────
+        verde  = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        amarillo = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+            veredicto_cell = row[19]  # Columna T (índice 19)
+            veredicto_val  = str(veredicto_cell.value or "")
+            if veredicto_val.startswith("OPERAR") or veredicto_val.startswith("🟢 OPERAR"):
+                for cell in row:
+                    cell.fill = verde
+            elif "MONITOR" in veredicto_val or "WATCHLIST" in veredicto_val:
+                for cell in row:
+                    cell.fill = amarillo
+
+        # ── Freeze panes (primera fila fija) ──────────────────────────────────
+        ws.freeze_panes = "A2"
+
+    print(f"\n📊 Excel exportado: {ruta} ({len(filas)} ganadores)")
+    return ruta
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. EXTRAER VEREDICTO DEL REPORTE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extraer_veredicto(reporte: str) -> str:
+    """Extrae el veredicto del texto generado por Claude."""
+    reporte_upper = reporte.upper()
+    if "DESCARTAR" in reporte_upper or "NO OPERAR" in reporte_upper:
+        return "DESCARTAR"
+    if "🟢 OPERAR" in reporte_upper or "VEREDICTO FINAL: OPERAR" in reporte_upper:
+        return "OPERAR"
+    if "MONITOREAR" in reporte_upper or "WATCHLIST" in reporte_upper:
+        return "MONITOREAR"
+    return "DESCARTAR"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. MAIN — SCREENER MASIVO
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    # ── Argumentos de línea de comandos ──────────────────────────────────────
+    parser = argparse.ArgumentParser(description="CAN SLIM Mass Screener — S&P 500 + Russell 2000")
+    parser.add_argument("--test",       type=int,   metavar="N",        help="Analiza solo los primeros N tickers")
+    parser.add_argument("--resume",     action="store_true",            help="Retoma desde donde se interrumpió")
+    parser.add_argument("--no-claude",  action="store_true",            help="No llama a Claude (solo pre-filtro)")
+    parser.add_argument("--universo",   type=str,   default="russell2000",
+                        choices=["sp500","russell2000","ambos"],        help="Universo de acciones a analizar")
+
+    args = parser.parse_args()
+
+    modo_test      = args.test
+    modo_resume    = args.resume
+    sin_claude     = args.no_claude
+    universo       = args.universo
+
+    # ── Cargar progreso si --resume ───────────────────────────────────────────
+    progreso  = cargar_progreso() if modo_resume else {"procesados": [], "ganadores": []}
+    ya_vistos = set(progreso["procesados"])
+    ganadores = progreso["ganadores"]   # Lista de dicts con datos de ganadores
+
+    # ── Obtener lista de tickers ──────────────────────────────────────────────
+    todos_tickers = obtener_tickers(universo)
+
+    if modo_test:
+        todos_tickers = todos_tickers[:modo_test]
+        print(f"🧪 MODO TEST: analizando solo {modo_test} tickers")
+
+    # Filtrar los ya procesados si estamos retomando
+    tickers_pendientes = [t for t in todos_tickers if t not in ya_vistos]
+
+    total      = len(todos_tickers)
+    pendientes = len(tickers_pendientes)
+    print(f"\n📊 Universo [{universo.upper()}]: {total} tickers")
+    if modo_resume:
+        print(f"   Ya procesados: {total - pendientes} | Pendientes: {pendientes}")
+
+    # ── Pre-descargar SPY una sola vez (optimización crítica) ─────────────────
+    print("\n📡 Descargando SPY (benchmark)...")
+    try:
+        spy_close = yf.Ticker("SPY").history(period="1y")["Close"]
+        ret_spy   = round((spy_close.iloc[-1] / spy_close.iloc[0] - 1) * 100, 1)
+        print(f"✅ SPY descargado — Retorno 1Y: {ret_spy}%")
+    except Exception as e:
+        print(f"⚠️  No se pudo descargar SPY: {e}. Se descargará por ticker (más lento).")
+        spy_close = None
+
+    # ── Contadores ────────────────────────────────────────────────────────────
+    procesados_sesion = 0
+    descartados_f1    = 0
+    errores_count     = 0
+    inicio_sesion     = datetime.now()
+
+    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+    carpeta_reports = f"reports/{fecha_hoy}"
+    os.makedirs(carpeta_reports, exist_ok=True)
+
+    # ── Market Direction (una sola vez para toda la sesión) ─────────────────
+    market_data = calcular_market_direction()
+    print(f"\n🌐 Market Direction: {market_data.get('market_direction_status', 'N/D')} "
+          f"({market_data.get('distribution_days_25d', '?')} distribution days)")
+    if market_data.get("mercado_en_distribucion"):
+        print("⚠️  ALERTA: Mercado en distribución — O'Neil recomienda no abrir nuevas posiciones")
+
+    print(f"\n{'='*65}")
+    print(f"  🚀 INICIANDO SCREENER MASIVO — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"{'='*65}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BUCLE PRINCIPAL
+    # ══════════════════════════════════════════════════════════════════════════
+    for i, ticker in enumerate(tickers_pendientes, start=1):
+        num_global = total - pendientes + i
+        print(f"\n[{num_global}/{total}] {'─'*50}")
+        print(f"  🔍 {ticker}")
+
+        try:
+            # ── Extraer datos ─────────────────────────────────────────────────
+            datos = extraer_datos(ticker, market_data)
+
+            # ── Inyectar ret_spy pre-calculado si está disponible ─────────────
+            if spy_close is not None and "retorno_1y_ticker" in datos:
+                datos["retorno_1y_spy"] = ret_spy
+                # Recalcular RS Rating con el SPY pre-cargado
+                ret_t = datos.get("retorno_1y_ticker", 0) or 0
+                datos["rs_rating_aprox"] = min(99, max(1, int(50 + (ret_t - ret_spy) / 2)))
+                datos["rs_supera_mercado"] = bool(ret_t > ret_spy)
+
+            # ── PRE-FILTRO: Filtro 1 sin Claude ──────────────────────────────
+            pasa, motivo = pasa_filtro1_rapido(datos)
+
+            if not pasa:
+                descartados_f1 += 1
+                print(f"  🚫 F1 FALLA → {motivo} — saltando")
+                # Registrar como procesado y continuar al siguiente
+                ya_vistos.add(ticker)
+                progreso["procesados"].append(ticker)
+                guardar_progreso(progreso["procesados"], ganadores)
+                time.sleep(PAUSA_ENTRE_TICKERS)
+                continue  # ← SALTAR al siguiente ticker
+
+            # ── Filtro 1 OK → analizar con Claude ────────────────────────────
+            print(f"  ✅ F1 PASA — enviando a Claude para análisis completo")
+
+            if sin_claude:
+                # Modo sin Claude: guardar datos crudos
+                reporte  = f"[SIN CLAUDE] {ticker} pasó F1\n{json.dumps(datos, indent=2)}"
+                veredicto = "MONITOREAR"
+            else:
+                filtros  = evaluar_filtros(datos)
+                prompt   = construir_prompt(datos, filtros)
+                reporte  = analizar_con_claude(prompt, ticker)
+                veredicto = extraer_veredicto(reporte)
+
+            # ── Guardar reporte individual ────────────────────────────────────
+            guardar_reporte(ticker, reporte)
+            print(f"\n{reporte}")
+
+            # ── Telegram desactivado en el screener masivo ───────────────────
+            # Para recibir alertas de un ticker específico, usa screener.py
+
+            # ── Guardar en lista de ganadores (F1 pasa = relevante para Excel)
+            ganadores.append({
+                "ticker":    ticker,
+                "veredicto": veredicto,
+                "datos":     datos,
+                "reporte":   reporte[:500],  # Extracto para no inflar el JSON
+            })
+
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Interrupción manual — guardando progreso...")
+            guardar_progreso(progreso["procesados"], ganadores)
+            break
+
+        except Exception as e:
+            errores_count += 1
+            print(f"  ❌ Error con {ticker}: {e}")
+            time.sleep(PAUSA_TRAS_ERROR)
+
+        finally:
+            # Siempre marcar como procesado (incluso si hubo error)
+            if ticker not in ya_vistos:
+                ya_vistos.add(ticker)
+                progreso["procesados"].append(ticker)
+
+            procesados_sesion += 1
+            guardar_progreso(progreso["procesados"], ganadores)
+
+        time.sleep(PAUSA_ENTRE_TICKERS)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # RESUMEN FINAL
+    # ══════════════════════════════════════════════════════════════════════════
+    duracion = datetime.now() - inicio_sesion
+    mins     = int(duracion.total_seconds() // 60)
+    segs     = int(duracion.total_seconds() % 60)
+
+    print(f"\n{'='*65}")
+    print(f"  ✅ SCREENER COMPLETADO — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"{'='*65}")
+    print(f"  📊 Tickers procesados esta sesión : {procesados_sesion}")
+    print(f"  🚫 Descartados en F1 (sin Claude) : {descartados_f1}")
+    print(f"  🟢 Candidatos que pasaron F1      : {len(ganadores)}")
+    print(f"  ❌ Errores de descarga            : {errores_count}")
+    print(f"  ⏱️  Duración total                 : {mins}m {segs}s")
+
+    # ── Exportar Excel ────────────────────────────────────────────────────────
+    if ganadores:
+        ruta_excel = exportar_excel(ganadores, ARCHIVO_GANADORES)
+
+        print(f"\n  📁 Resultados guardados en: {ARCHIVO_GANADORES}")
+    else:
+        print("\n  🔍 Ningún ticker pasó el Filtro 1 en esta sesión.")
+
+    # Limpiar archivo de progreso si se completó todo
+    if len(progreso["procesados"]) >= total:
+        if os.path.exists(ARCHIVO_PROGRESO):
+            os.remove(ARCHIVO_PROGRESO)
+        print("  🗑️  Archivo de progreso eliminado (sesión completa)")
+
+    print(f"\n{'='*65}\n")
+
+
+if __name__ == "__main__":
+    main()
