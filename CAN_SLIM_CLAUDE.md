@@ -294,7 +294,7 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 | 1 Jun 2026 | `extraer_veredicto()` detectaba "OPERAR" dentro de "NO OPERAR" | Fix de parsing con orden de condiciones |
 | 1 Jun 2026 | `.env.save` con credenciales no protegido por `.gitignore` | `.gitignore` actualizado a `.env*` |
 | 1 Jun 2026 | Resumen de sesión mostraba `🟢 OPERAR` aunque Claude dijera ESPERAR | Pendiente: parsear veredicto final del reporte Claude |
-
+| 1 Jun 2026 | NumpyEncoder faltante — JSON serialization fallaba con tipos numpy int64/float64 | NumpyEncoder añadido en screener_sp500.py |
 ---
 
 # ESTADO DEL MERCADO (actualizar al inicio de cada sesión)
