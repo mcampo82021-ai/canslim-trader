@@ -199,8 +199,16 @@ def pasa_f1(datos: dict) -> tuple[bool, str]:
     if not datos.get("tendencia_alcista"):
         razones.append(f"SMA50 {datos.get('sma50')} < SMA200 {datos.get('sma200')}")
 
-    if datos.get("mercado_en_distribucion", False):
-        razones.append(f"Mercado distribución ({datos.get('distribution_days_25d')} days)")
+    mercado_en_dist = datos.get("mercado_en_distribucion")
+    if mercado_en_dist is not False:
+        if mercado_en_dist is None:
+            razones.append(f"Mercado desconocido (fail-closed — datos SPY no disponibles)")
+        else:
+            razones.append(f"Mercado distribución ({datos.get('distribution_days_25d')} days)")
+
+    eps_anual = datos.get("eps_anual_consistente")
+    if eps_anual is False:
+        razones.append("EPS anual inconsistente (criterio A de O'Neil)")
 
     return (False, " | ".join(razones)) if razones else (True, "OK")
 
@@ -297,8 +305,15 @@ def cargar_progreso() -> dict:
 
 
 def guardar_progreso(progreso: dict):
+    import numpy as np
+    class NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, (np.integer,)): return int(obj)
+            if isinstance(obj, (np.floating,)): return float(obj)
+            if isinstance(obj, np.ndarray): return obj.tolist()
+            return super().default(obj)
     with open(ARCHIVO_PROGRESO, "w", encoding="utf-8") as f:
-        json.dump(progreso, f, ensure_ascii=False, indent=2)
+        json.dump(progreso, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
