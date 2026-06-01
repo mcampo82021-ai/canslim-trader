@@ -262,15 +262,16 @@ El plugin oficial de OpenAI está instalado en Claude Code. Permite usar Codex c
 
 # WATCHLIST ACTIVA — 1 Junio 2026
 
-| Ticker | RS | Trigger para analizar |
+| Ticker | RS | Trigger / Estado |
 |---|---|---|
 | VISN | 99 | Ruptura $12.80 con volumen ≥ 10.6M |
-| AUPH | 82 | RS supere 85 |
-| ERO | 92 | Confirmar patrón técnico |
-| COCO | 90 | Confirmar patrón técnico |
-| AGX | 99 | Pendiente análisis con screener.py |
-| YOU | 99 | Pendiente análisis con screener.py |
-| INSW | 97 | Pendiente análisis con screener.py |
+| YOU | 99 | Breakout $62.36 con volumen ≥ 50% promedio |
+| AGX | 99 | Breakout $740.91 con volumen ≥ 500K |
+| COCO | 93 | Esperar pullback a SMA50 ~$60.68 |
+| AUPH | 82 | Cuando RS supere 85 → analizar con Claude |
+| PAYS | 71 | Cuando RS supere 85 Y volumen promedio supere 1M |
+| ERO | — | DESCARTADO |
+| INSW | — | DESCARTADO |
 
 Criterio general: cuando RS Rating supere 85 + mercado alcista confirmado con FTD → analizar con Claude.
 
