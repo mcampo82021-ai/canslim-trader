@@ -229,6 +229,26 @@ El plugin oficial de OpenAI está instalado en Claude Code. Permite usar Codex c
 
 ---
 
+# TRADINGVIEW MCP
+
+- **Servidor:** [tradingview-mcp](https://github.com/tradesdontlie/tradingview-mcp)
+- **Config:** `~/Documents/CAN SLIM/.mcp.json`
+- **Requisitos:** TradingView Desktop abierto + servidor Node corriendo (`node server.js` en el repo del MCP)
+- **Uso principal:** auditoría técnica con datos OHLCV reales — complementa `technical_audit.py` con acceso directo al chart en vivo
+
+**Herramientas clave:**
+| Herramienta | Uso en CAN SLIM |
+|---|---|
+| `tv_health_check` | Verificar conexión al inicio de sesión |
+| `chart_set_symbol` | Cambiar ticker en el chart activo |
+| `data_get_ohlcv` | Obtener barras OHLCV (siempre `summary=true`) |
+| `quote_get` | Precio en tiempo real (last, OHLC, volumen) |
+| `data_get_study_values` | Leer valores de indicadores visibles (RSI, EMA, MACD) |
+| `capture_screenshot` | Capturar chart para análisis visual |
+| `chart_set_timeframe` | Cambiar temporalidad (D, W, M) |
+
+---
+
 # BUGS CONOCIDOS Y FIXES APLICADOS
 
 | Fecha | Bug | Fix aplicado |
