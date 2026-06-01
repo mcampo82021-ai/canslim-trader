@@ -244,7 +244,7 @@ def extraer_datos(ticker_symbol: str, market_data: dict) -> dict:
                         g = round(((eps_anual[i] - base) / abs(base)) * 100, 1)
                         crecimientos.append(g)
                 datos["eps_anual_crecimientos_3y"] = crecimientos[:3]
-                datos["eps_anual_consistente"]     = all(g > 0 for g in crecimientos[:3])
+                datos["eps_anual_consistente"]     = sum(1 for g in crecimientos[:3] if g > 0) >= 2
                 datos["eps_anual_todos_25pct"]     = all(g >= 25 for g in crecimientos[:3])
             else:
                 datos["eps_anual_crecimientos_3y"] = []
@@ -401,6 +401,17 @@ def extraer_datos(ticker_symbol: str, market_data: dict) -> dict:
 # 2. LÓGICA DE FILTROS (early exit si F1 falla)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def extraer_veredicto(veredicto: str) -> str:
+    """Categoriza un veredicto sin falsos positivos por substring.
+    Usa el prefijo emoji en lugar de 'OPERAR' in v para evitar
+    que 'NO OPERAR' sea tratado como positivo."""
+    if veredicto.startswith("🟢 OPERAR"):
+        return "OPERAR"
+    if veredicto.startswith("👀 WATCHLIST"):
+        return "WATCHLIST"
+    return "DESCARTAR"
+
+
 def evaluar_filtros(datos: dict) -> dict:
     """Evalúa los 4 filtros con early exit. Retorna resultado y cuál filtro falló."""
 
@@ -419,7 +430,7 @@ def evaluar_filtros(datos: dict) -> dict:
     f1_eps_rev   = eps_rev == "positivo"
     f1_tendencia = tendencia is True
     f1_mercado   = mercado_ok
-    f1_anual     = eps_anual is True or eps_anual is None  # None = datos no disponibles (no penalizar)
+    f1_anual     = eps_anual is True or eps_anual is None  # True = ≥2/3 años con crecimiento; None = datos no disponibles (no penalizar)
 
     resultado["f1_eps_trim"]  = f1_eps_trim
     resultado["f1_eps_rev"]   = f1_eps_rev
@@ -808,10 +819,18 @@ def main():
         print("  RESUMEN DE SESIÓN")
         print(f"  Market: {market_data.get('market_direction_status', 'N/D')}")
         print(f"{'='*60}")
+        operar_n = watchlist_n = descartar_n = 0
         for r in resultados:
-            estado = "✅" if r["ok"] else "❌"
+            estado    = "✅" if r["ok"] else "❌"
             veredicto = r.get("veredicto", r.get("error", ""))
+            if r["ok"]:
+                cat = extraer_veredicto(veredicto)
+                if cat == "OPERAR":    operar_n    += 1
+                elif cat == "WATCHLIST": watchlist_n += 1
+                else:                  descartar_n += 1
             print(f"  {estado} {r['ticker']:10} {veredicto}")
+        print(f"{'='*60}")
+        print(f"  🟢 OPERAR: {operar_n}  👀 WATCHLIST: {watchlist_n}  🚫 DESCARTAR: {descartar_n}")
 
 
 if __name__ == "__main__":
