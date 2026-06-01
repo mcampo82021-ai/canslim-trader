@@ -1,28 +1,41 @@
 """
-screener.py — CAN SLIM + Trade Like a Stock Market Wizard
+screener.py — CAN SLIM + Trade Like a Stock Market Wizard v2.0
 Extrae datos de yfinance y genera análisis estructurado vía Claude API.
+
+Cambios v2.0 (alineado con libro O'Neil):
+  - EPS trimestral YoY ≥25% (antes: revenue anual >20%)
+  - Sales growth trimestral YoY como confirmación
+  - EPS anual 3 años consecutivos (criterio A de O'Neil)
+  - Market Direction: distribution days en SPY (criterio M)
+  - Cash Flow vs EPS ≥20% (calidad de earnings)
+  - Volumen vs promedio 50d en breakout (≥50% según O'Neil)
+  - ROE umbral ajustado a 17% (antes 15%)
+  - RS Rating umbral ajustado a 85 (antes 80)
+  - Early exit: si F1 falla, no procesa F2/F3/F4
 
 Uso:
     python3 screener.py AXON
-    python3 screener.py AXON NVDA CRWD   ← múltiples tickers
+    python3 screener.py ORLA ERO RELY APP IONQ ALAB
 
 Requisitos:
     pip3 install yfinance anthropic python-dotenv
 
 Configuración:
-    Crear archivo .env en la misma carpeta con:
+    Crear archivo .env en la misma carpeta:
     ANTHROPIC_API_KEY=sk-ant-...
+    TELEGRAM_BOT_TOKEN=...
+    TELEGRAM_CHAT_ID=...
 """
 
 import sys
 import json
 import os
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── dependencias ──────────────────────────────────────────────────────────────
 try:
     import yfinance as yf
 except ImportError:
@@ -37,11 +50,134 @@ except ImportError:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 0. MARKET DIRECTION (criterio M — se calcula una vez por sesión)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calcular_market_direction() -> dict:
+    """
+    Criterio M de O'Neil — versión completa con Follow-Through Day (FTD).
+
+    Distribution day = SPY baja ≥0.2% en volumen mayor al día anterior.
+    Señal de techo: ≥5 distribution days en las últimas 25 sesiones.
+
+    Follow-Through Day (FTD) = señal de que el mercado retomó tendencia alcista:
+    - El SPY tocó un mínimo reciente (inicio del intento de rally)
+    - Entre el día 4 y 7 del rally, sube ≥1.5% en volumen mayor al día anterior
+    - Esto confirma que las instituciones volvieron a comprar
+
+    Lógica de veredicto final:
+    - Si hay FTD confirmado → ALCISTA (aunque haya distribution days)
+    - Si hay ≥5 dist. days sin FTD → DISTRIBUCIÓN
+    - Si hay <5 dist. days sin FTD → ALCISTA
+    """
+    print("\n📊 Calculando Market Direction (criterio M)...")
+    try:
+        spy = yf.Ticker("SPY").history(period="6mo")
+        if spy.empty or len(spy) < 30:
+            return {"distribution_days_25d": None, "mercado_en_distribucion": None,
+                    "market_direction_error": "Datos insuficientes de SPY"}
+
+        close = spy["Close"]
+        volume = spy["Volume"]
+
+        # ── 1. Contar Distribution Days (últimas 25 sesiones) ─────────────────
+        distribution_days = 0
+        for i in range(1, 26):
+            try:
+                c_hoy  = close.iloc[-i]
+                c_prev = close.iloc[-(i+1)]
+                v_hoy  = volume.iloc[-i]
+                v_prev = volume.iloc[-(i+1)]
+                pct    = ((c_hoy / c_prev) - 1) * 100
+                if pct <= -0.2 and v_hoy > v_prev:
+                    distribution_days += 1
+            except IndexError:
+                break
+
+        en_distribucion = distribution_days >= 5
+
+        # ── 2. Detectar Follow-Through Day (últimas 25 sesiones) ──────────────
+        ftd_confirmado   = False
+        ftd_fecha        = None
+        ftd_pct          = None
+        ftd_dia_del_rally = None
+
+        # Buscar el mínimo más reciente como inicio del intento de rally
+        ventana = min(25, len(close) - 8)
+        minimo_idx = None
+        minimo_val = float("inf")
+
+        for i in range(7, ventana + 7):
+            val = close.iloc[-i]
+            if val < minimo_val:
+                minimo_val = val
+                minimo_idx = i
+
+        if minimo_idx is not None:
+            # Contar días desde el mínimo hacia adelante (día 1 = día del mínimo)
+            for dia in range(4, 8):  # días 4, 5, 6, 7 del rally
+                idx_dia = minimo_idx - dia
+                if idx_dia < 1 or idx_dia >= len(close):
+                    continue
+                try:
+                    c_dia  = close.iloc[-idx_dia]
+                    c_prev = close.iloc[-(idx_dia + 1)]
+                    v_dia  = volume.iloc[-idx_dia]
+                    v_prev = volume.iloc[-(idx_dia + 1)]
+                    pct_subida = ((c_dia / c_prev) - 1) * 100
+
+                    if pct_subida >= 1.5 and v_dia > v_prev:
+                        ftd_confirmado    = True
+                        ftd_pct           = round(pct_subida, 2)
+                        ftd_dia_del_rally = dia
+                        ftd_fecha         = close.index[-idx_dia].strftime("%Y-%m-%d")
+                        break
+                except IndexError:
+                    continue
+
+        # ── 3. Veredicto final ────────────────────────────────────────────────
+        # FTD reciente cancela la señal de distribución
+        if ftd_confirmado:
+            mercado_en_distribucion = False
+            status = "ALCISTA ✅ (FTD confirmado)"
+        elif en_distribucion:
+            mercado_en_distribucion = True
+            status = "DISTRIBUCIÓN ⚠️"
+        else:
+            mercado_en_distribucion = False
+            status = "ALCISTA ✅"
+
+        # ── 4. SPY desde máximo reciente (contexto) ───────────────────────────
+        spy_reciente  = close.tail(10)
+        precio_actual = spy_reciente.iloc[-1]
+        max_10d       = spy_reciente.max()
+        pct_desde_max = round(((precio_actual / max_10d) - 1) * 100, 1)
+
+        resultado = {
+            "distribution_days_25d":    distribution_days,
+            "mercado_en_distribucion":  mercado_en_distribucion,
+            "spy_pct_desde_maximo_10d": pct_desde_max,
+            "market_direction_status":  status,
+            "ftd_confirmado":           ftd_confirmado,
+        }
+        if ftd_confirmado:
+            resultado["ftd_fecha"]         = ftd_fecha
+            resultado["ftd_pct_subida"]    = ftd_pct
+            resultado["ftd_dia_del_rally"] = ftd_dia_del_rally
+
+        return resultado
+
+    except Exception as e:
+        return {"distribution_days_25d": None, "mercado_en_distribucion": None,
+                "market_direction_error": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 1. EXTRACCIÓN DE DATOS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def extraer_datos(ticker_symbol: str) -> dict:
-    """Extrae todos los datos necesarios para los 4 filtros CAN SLIM."""
+def extraer_datos(ticker_symbol: str, market_data: dict) -> dict:
+    """Extrae todos los datos necesarios para los filtros CAN SLIM."""
 
     print(f"\n📡 Descargando datos para {ticker_symbol}...")
     t = yf.Ticker(ticker_symbol)
@@ -50,180 +186,400 @@ def extraer_datos(ticker_symbol: str) -> dict:
     datos = {
         "ticker": ticker_symbol,
         "fecha_analisis": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "errores": []
+        "errores": [],
+        # Inyectar Market Direction (calculado una vez)
+        **market_data
     }
 
-    # ── FILTRO 1: Obligatorio ─────────────────────────────────────────────────
-
-    # Revenue Growth YoY
+    # ── CRITERIO C: EPS trimestral YoY (≥25% mínimo, ≥40% preferido) ────────
     try:
-        financials = t.financials
-        if financials is not None and not financials.empty and "Total Revenue" in financials.index:
-            rev = financials.loc["Total Revenue"].dropna()
-            if len(rev) >= 2:
-                datos["revenue_growth_yoy"] = round(
-                    ((rev.iloc[0] - rev.iloc[1]) / abs(rev.iloc[1])) * 100, 1
-                )
-            else:
-                datos["revenue_growth_yoy"] = None
-                datos["errores"].append("Revenue: datos insuficientes")
-        else:
-            datos["revenue_growth_yoy"] = None
-            datos["errores"].append("Revenue: no disponible en financials")
-    except Exception as e:
-        datos["revenue_growth_yoy"] = None
-        datos["errores"].append(f"Revenue: {e}")
+        qf = t.quarterly_financials
+        if qf is not None and not qf.empty:
+            # EPS trimestral YoY
+            if "Net Income" in qf.index:
+                ni = qf.loc["Net Income"].dropna()
+                shares = info.get("sharesOutstanding", 1)
+                if len(ni) >= 5 and shares:
+                    eps_q_actual   = ni.iloc[0] / shares
+                    eps_q_hace_1y  = ni.iloc[4] / shares
+                    if eps_q_hace_1y != 0:
+                        eps_trim_yoy = round(((eps_q_actual - eps_q_hace_1y) / abs(eps_q_hace_1y)) * 100, 1)
+                        datos["eps_trimestral_yoy"] = eps_trim_yoy
+                    else:
+                        datos["eps_trimestral_yoy"] = None
 
-    # EPS Revisions — aproximación: comparar EPS estimado vs EPS real últimos 4 trimestres
+            # Sales trimestral YoY (confirmación requerida por O'Neil ≥25%)
+            if "Total Revenue" in qf.index:
+                rev = qf.loc["Total Revenue"].dropna()
+                if len(rev) >= 5:
+                    sales_trim_yoy = round(((rev.iloc[0] - rev.iloc[4]) / abs(rev.iloc[4])) * 100, 1)
+                    datos["sales_trimestral_yoy"] = sales_trim_yoy
+                elif len(rev) >= 2:
+                    # Fallback: YoY secuencial si no hay 5 trimestres
+                    sales_trim_yoy = round(((rev.iloc[0] - rev.iloc[1]) / abs(rev.iloc[1])) * 100, 1)
+                    datos["sales_trimestral_yoy"] = sales_trim_yoy
+                    datos["errores"].append("Sales: usando variación secuencial (sin dato hace 1 año)")
+        else:
+            datos["eps_trimestral_yoy"] = None
+            datos["sales_trimestral_yoy"] = None
+            datos["errores"].append("Quarterly financials: no disponible")
+    except Exception as e:
+        datos["eps_trimestral_yoy"] = None
+        datos["sales_trimestral_yoy"] = None
+        datos["errores"].append(f"EPS/Sales trimestral: {e}")
+
+    # ── CRITERIO A: EPS anual 3 años consecutivos ≥25%/año ───────────────────
+    try:
+        # Revenue anual como proxy de EPS anual (yfinance.earnings no siempre disponible)
+        financials = t.financials
+        if financials is not None and not financials.empty and "Net Income" in financials.index:
+            ni_anual = financials.loc["Net Income"].dropna()
+            shares = info.get("sharesOutstanding", 1)
+            if len(ni_anual) >= 4 and shares:
+                eps_anual = [round(ni_anual.iloc[i] / shares, 4) for i in range(len(ni_anual))]
+                crecimientos = []
+                for i in range(len(eps_anual) - 1):
+                    base = eps_anual[i + 1]
+                    if base != 0:
+                        g = round(((eps_anual[i] - base) / abs(base)) * 100, 1)
+                        crecimientos.append(g)
+                datos["eps_anual_crecimientos_3y"] = crecimientos[:3]
+                datos["eps_anual_consistente"]     = all(g > 0 for g in crecimientos[:3])
+                datos["eps_anual_todos_25pct"]     = all(g >= 25 for g in crecimientos[:3])
+            else:
+                datos["eps_anual_crecimientos_3y"] = []
+                datos["eps_anual_consistente"]     = None
+                datos["eps_anual_todos_25pct"]     = None
+                datos["errores"].append("EPS anual: datos insuficientes (se necesitan 4 años)")
+        else:
+            datos["eps_anual_crecimientos_3y"] = []
+            datos["eps_anual_consistente"]     = None
+            datos["eps_anual_todos_25pct"]     = None
+            datos["errores"].append("EPS anual: financials no disponible")
+    except Exception as e:
+        datos["eps_anual_crecimientos_3y"] = []
+        datos["eps_anual_consistente"]     = None
+        datos["eps_anual_todos_25pct"]     = None
+        datos["errores"].append(f"EPS anual 3Y: {e}")
+
+    # ── EPS Revisions últimos 30 días (señal prospectiva) ────────────────────
+    try:
+        trend = t.eps_trend
+        if trend is not None and not trend.empty and "0q" in trend.index:
+            row = trend.loc["0q"]
+            actual  = float(row.get("current",   0) or 0)
+            ago_30d = float(row.get("30daysAgo", 0) or 0)
+            if "0y" in trend.index:
+                row_y = trend.loc["0y"]
+                act_y = float(row_y.get("current",   0) or 0)
+                ago_y = float(row_y.get("30daysAgo", 0) or 0)
+                if ago_y != 0:
+                    datos["eps_revision_anual_30d_pct"] = round(((act_y - ago_y) / abs(ago_y)) * 100, 1)
+            if ago_30d != 0:
+                cambio_30d = ((actual - ago_30d) / abs(ago_30d)) * 100
+                datos["eps_revision_30d_pct"]  = round(cambio_30d, 1)
+                anual_ok = datos.get("eps_revision_anual_30d_pct", 0) > 20
+                datos["eps_revision_proxy"]    = "positivo" if (cambio_30d > 0 or anual_ok) else "negativo"
+            else:
+                datos["eps_revision_30d_pct"] = None
+                datos["eps_revision_proxy"]   = "negativo"
+        else:
+            datos["eps_revision_30d_pct"] = None
+            datos["eps_revision_proxy"]   = "negativo"
+            datos["errores"].append("EPS trend: no disponible")
+    except Exception as e:
+        datos["eps_revision_30d_pct"] = None
+        datos["eps_revision_proxy"]   = "negativo"
+        datos["errores"].append(f"EPS revisions: {e}")
+
+    # ── EPS beats históricos (señal secundaria) ───────────────────────────────
     try:
         eh = t.earnings_history
         if eh is not None and not eh.empty and "epsEstimate" in eh.columns and "epsActual" in eh.columns:
             ultimos = eh.tail(4).dropna(subset=["epsEstimate", "epsActual"])
             beats = (ultimos["epsActual"] > ultimos["epsEstimate"]).sum()
             datos["eps_beats_ultimos_4q"] = int(beats)
-            datos["eps_revision_proxy"] = "positivo" if beats >= 3 else "negativo"
         else:
             datos["eps_beats_ultimos_4q"] = None
-            datos["eps_revision_proxy"] = None
-            datos["errores"].append("EPS history: no disponible")
     except Exception as e:
         datos["eps_beats_ultimos_4q"] = None
-        datos["eps_revision_proxy"] = None
-        datos["errores"].append(f"EPS: {e}")
+        datos["errores"].append(f"EPS beats: {e}")
 
-    # SMA50 vs SMA200
+    # ── SMA50 vs SMA200 + RS Rating + Volumen vs 50d ─────────────────────────
     try:
         hist = t.history(period="1y")
         if not hist.empty and len(hist) >= 50:
             close = hist["Close"]
+            vol   = hist["Volume"]
+
             sma50  = round(close.tail(50).mean(), 2)
             sma200 = round(close.tail(200).mean(), 2) if len(close) >= 200 else None
-            precio_actual = round(close.iloc[-1], 2)
-            datos["precio_actual"]   = precio_actual
-            datos["sma50"]           = sma50
-            datos["sma200"]          = sma200
+            datos["precio_actual"]    = round(close.iloc[-1], 2)
+            datos["sma50"]            = sma50
+            datos["sma200"]           = sma200
             datos["tendencia_alcista"] = bool(sma50 > sma200) if sma200 else None
 
-            # RS aproximado vs SPY
+            # RS Rating proxy vs SPY
             spy_hist = yf.Ticker("SPY").history(period="1y")["Close"]
             ret_ticker = round((close.iloc[-1] / close.iloc[0] - 1) * 100, 1)
             ret_spy    = round((spy_hist.iloc[-1] / spy_hist.iloc[0] - 1) * 100, 1)
             datos["retorno_1y_ticker"] = ret_ticker
             datos["retorno_1y_spy"]    = ret_spy
             datos["rs_supera_mercado"] = bool(ret_ticker > ret_spy)
-            # RS percentil aproximado (0-99)
             datos["rs_rating_aprox"]   = min(99, max(1, int(50 + (ret_ticker - ret_spy) / 2)))
+
+            # Volumen relativo vs promedio 50 días (O'Neil: ≥50% en breakout)
+            vol_50d_avg = round(vol.tail(50).mean(), 0)
+            vol_hoy     = vol.iloc[-1]
+            datos["vol_50d_avg"]        = int(vol_50d_avg)
+            datos["vol_vs_50d_avg_pct"] = round(((vol_hoy / vol_50d_avg) - 1) * 100, 1) if vol_50d_avg > 0 else None
+            datos["vol_breakout_valido"] = bool(datos["vol_vs_50d_avg_pct"] >= 50) if datos["vol_vs_50d_avg_pct"] is not None else None
+
+            # Máximo 52 semanas (para criterio N)
+            datos["maximo_52w"] = round(close.tail(252).max(), 2) if len(close) >= 252 else round(close.max(), 2)
+            datos["pct_desde_maximo_52w"] = round(((datos["precio_actual"] / datos["maximo_52w"]) - 1) * 100, 1)
+            datos["cerca_maximo_52w"]     = bool(datos["pct_desde_52w"] >= -10) if (pct := datos.get("pct_desde_maximo_52w")) else None
+            datos["cerca_maximo_52w"]     = bool(datos["pct_desde_maximo_52w"] >= -10)
         else:
             datos["errores"].append("Historia de precios insuficiente")
     except Exception as e:
-        datos["errores"].append(f"Precios/SMA: {e}")
+        datos["errores"].append(f"Precios/SMA/Volumen: {e}")
 
     # ── FILTRO 2: Calidad del negocio ─────────────────────────────────────────
-
-    datos["roe"]           = round(info.get("returnOnEquity", 0) * 100, 1) if info.get("returnOnEquity") else None
-    datos["roic_proxy"]    = datos["roe"]   # ROE como proxy de ROIC
-
-    datos["net_margin"]    = round(info.get("profitMargins", 0) * 100, 1) if info.get("profitMargins") else None
+    datos["roe"]        = round(info.get("returnOnEquity", 0) * 100, 1) if info.get("returnOnEquity") else None
+    datos["roic_proxy"] = datos["roe"]
+    datos["net_margin"] = round(info.get("profitMargins",  0) * 100, 1) if info.get("profitMargins")  else None
 
     fcf        = info.get("freeCashflow")
     market_cap = info.get("marketCap")
     net_income = info.get("netIncomeToCommon")
+    op_cf      = info.get("operatingCashflow")
+    shares     = info.get("sharesOutstanding")
+    eps_ttm    = info.get("trailingEps")
 
-    datos["fcf_yield"] = round((fcf / market_cap) * 100, 1) if fcf and market_cap else None
+    datos["fcf_yield"]            = round((fcf / market_cap) * 100, 1) if fcf and market_cap else None
     datos["fcf_net_income_ratio"] = round((fcf / net_income) * 100, 1) if fcf and net_income and net_income > 0 else None
+
+    # Cash Flow vs EPS ≥20% (O'Neil: calidad de earnings)
+    if op_cf and shares and eps_ttm and shares > 0 and eps_ttm > 0:
+        cf_per_share = op_cf / shares
+        datos["cf_vs_eps_pct"]  = round(((cf_per_share - eps_ttm) / abs(eps_ttm)) * 100, 1)
+        datos["cf_calidad_ok"]  = bool(datos["cf_vs_eps_pct"] >= 20)
+    else:
+        datos["cf_vs_eps_pct"] = None
+        datos["cf_calidad_ok"] = None
 
     de = info.get("debtToEquity")
     datos["debt_equity"] = round(de / 100, 2) if de is not None else None
 
     # ── FILTRO 3: Validación institucional ────────────────────────────────────
-
-    inst = info.get("institutionPercentHeld")
+    inst = info.get("institutionPercentHeld") or info.get("heldPercentInstitutions")
     datos["inst_ownership_pct"] = round(inst * 100, 1) if inst else None
 
     target_mean = info.get("targetMeanPrice")
     precio      = datos.get("precio_actual") or info.get("currentPrice")
     if target_mean and precio:
-        datos["price_target"]    = round(target_mean, 2)
+        datos["price_target"]      = round(target_mean, 2)
         datos["target_upside_pct"] = round(((target_mean - precio) / precio) * 100, 1)
     else:
-        datos["price_target"]    = None
+        datos["price_target"]      = None
         datos["target_upside_pct"] = None
 
     # ── FILTRO 4: Operativo ───────────────────────────────────────────────────
-
-    datos["avg_volume_20d"]  = info.get("averageVolume")
-    datos["volume_hoy"]      = info.get("regularMarketVolume")
-    datos["market_cap"]      = market_cap
-    datos["nombre_empresa"]  = info.get("longName", ticker_symbol)
-    datos["sector"]          = info.get("sector", "N/D")
-    datos["industria"]       = info.get("industry", "N/D")
+    datos["avg_volume_20d"] = info.get("averageVolume")
+    datos["volume_hoy"]     = info.get("regularMarketVolume")
+    datos["market_cap"]     = market_cap
+    datos["nombre_empresa"] = info.get("longName", ticker_symbol)
+    datos["sector"]         = info.get("sector", "N/D")
+    datos["industria"]      = info.get("industry", "N/D")
 
     print(f"✅ Datos extraídos para {ticker_symbol}")
     return datos
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. PROMPT MASTER → CLAUDE API
+# 2. LÓGICA DE FILTROS (early exit si F1 falla)
 # ══════════════════════════════════════════════════════════════════════════════
 
-MASTER_PROMPT = """Actúa como analista CAN SLIM + Trade Like a Stock Market Wizard.
-Analiza los datos estructurados recibidos y aplica los 4 filtros exactamente en este formato.
-No busques información adicional. Solo usa los datos provistos.
+def evaluar_filtros(datos: dict) -> dict:
+    """Evalúa los 4 filtros con early exit. Retorna resultado y cuál filtro falló."""
+
+    resultado = {"pasa_f1": False, "pasa_f2": False, "pasa_f3": False,
+                 "pasa_f4": False, "fallo_en": None, "veredicto": "🚫 DESCARTAR"}
+
+    # ── FILTRO 1 ──────────────────────────────────────────────────────────────
+    eps_trim          = datos.get("eps_trimestral_yoy")
+    eps_rev           = datos.get("eps_revision_proxy")
+    tendencia         = datos.get("tendencia_alcista")
+    mercado_en_dist   = datos.get("mercado_en_distribucion")  # None = error/desconocido
+    mercado_ok        = mercado_en_dist is False  # fail-closed: None o True → no pasa
+    eps_anual         = datos.get("eps_anual_consistente")
+
+    f1_eps_trim  = eps_trim is not None and eps_trim >= 25
+    f1_eps_rev   = eps_rev == "positivo"
+    f1_tendencia = tendencia is True
+    f1_mercado   = mercado_ok
+    f1_anual     = eps_anual is True or eps_anual is None  # None = datos no disponibles (no penalizar)
+
+    resultado["f1_eps_trim"]  = f1_eps_trim
+    resultado["f1_eps_rev"]   = f1_eps_rev
+    resultado["f1_tendencia"] = f1_tendencia
+    resultado["f1_mercado"]   = f1_mercado
+    resultado["f1_anual"]     = f1_anual
+
+    if not (f1_eps_trim and f1_eps_rev and f1_tendencia and f1_mercado and f1_anual):
+        fallas = []
+        if not f1_eps_trim:  fallas.append(f"EPS trim YoY {eps_trim}% < 25%")
+        if not f1_eps_rev:   fallas.append("EPS revisions negativas")
+        if not f1_tendencia: fallas.append("SMA50 < SMA200")
+        if not f1_mercado:
+            if mercado_en_dist is None:
+                err = datos.get("market_direction_error", "datos SPY no disponibles")
+                fallas.append(f"Dirección de mercado desconocida ({err})")
+            else:
+                fallas.append(f"Mercado en distribución ({datos.get('distribution_days_25d')} dist. days)")
+        if not f1_anual:     fallas.append("EPS anual inconsistente (criterio A de O'Neil)")
+        resultado["fallo_en"] = "F1: " + " | ".join(fallas)
+        return resultado
+
+    resultado["pasa_f1"] = True
+
+    # ── FILTRO 2 ──────────────────────────────────────────────────────────────
+    roe      = datos.get("roic_proxy")
+    margin   = datos.get("net_margin")
+    fcf_ok   = (datos.get("fcf_yield") or 0) > 3 or (datos.get("fcf_net_income_ratio") or 0) > 80
+    de       = datos.get("debt_equity")
+
+    f2 = [
+        roe is not None and roe >= 17,       # O'Neil: mínimo 17%
+        margin is not None and margin >= 10,
+        fcf_ok,
+        de is not None and de < 1,
+    ]
+    resultado["f2_score"]    = sum(f2)
+    resultado["f2_detalle"]  = f2
+    resultado["pasa_f2"]     = sum(f2) >= 3
+
+    if not resultado["pasa_f2"]:
+        resultado["fallo_en"] = f"F2: solo {sum(f2)}/4 criterios de calidad"
+        resultado["veredicto"] = "🚫 DESCARTAR"
+        return resultado
+
+    # ── FILTRO 3 ──────────────────────────────────────────────────────────────
+    rs        = datos.get("rs_rating_aprox")
+    inst      = datos.get("inst_ownership_pct")
+    upside    = datos.get("target_upside_pct")
+
+    f3 = [
+        rs is not None and rs >= 85,         # O'Neil: mínimo 85
+        inst is not None and inst >= 40,
+        upside is not None and upside >= 30,
+    ]
+    resultado["f3_score"]   = sum(f3)
+    resultado["f3_detalle"] = f3
+    resultado["pasa_f3"]    = sum(f3) >= 2
+
+    if not resultado["pasa_f3"]:
+        resultado["fallo_en"] = f"F3: solo {sum(f3)}/3 validación institucional"
+        resultado["veredicto"] = "👀 WATCHLIST"
+        return resultado
+
+    resultado["pasa_f3"] = True
+
+    # ── FILTRO 4 ──────────────────────────────────────────────────────────────
+    avg_vol    = datos.get("avg_volume_20d") or 0
+    vol_hoy    = datos.get("volume_hoy") or 0
+    tendencia4 = datos.get("tendencia_alcista")
+
+    f4 = avg_vol >= 1_000_000 and vol_hoy >= 500_000 and tendencia4
+    resultado["pasa_f4"]  = bool(f4)
+    resultado["veredicto"] = "🟢 OPERAR — pendiente auditoría cualitativa" if f4 else "👀 WATCHLIST — volumen insuficiente"
+
+    return resultado
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. PROMPT MASTER (solo para acciones que pasan F1+F2+F3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+MASTER_PROMPT = """Actúa como analista CAN SLIM purista basado en William O'Neil.
+Completa el análisis con los datos provistos. No busques información adicional.
+Si F1 falló, emite DESCARTAR inmediatamente sin analizar F2/F3/F4.
+Mantén exactamente el mismo formato de salida. Sé conciso y directo.
 
 DATOS DEL TICKER:
 {datos_json}
 
+RESULTADO DE FILTROS:
+{filtros_json}
+
 CUENTA: $1,000 USD | RIESGO POR OPERACIÓN: 2% = $20
 
 ---
-ANÁLISIS CAN SLIM — {ticker}
-Empresa: {nombre} | Sector: {sector} | Fecha: {fecha}
+ANÁLISIS CAN SLIM v2.0 — {ticker}
+Empresa: {nombre} | Sector: {sector} | Industria: {industria} | Fecha: {fecha}
+
+MARKET DIRECTION (criterio M — O'Neil: el más importante)
+[{f_mercado}] Distribution days últimas 5 semanas: {distribution_days_25d} (máximo tolerable: 4)
+Estado: {market_direction_status}
 
 FILTRO 1 — OBLIGATORIO (falla uno → DESCARTAR)
-[{f1_rev}] Revenue Growth YoY: {revenue_growth_yoy}% (mínimo >20%)
-[{f1_eps}] EPS Revisions proxy: {eps_revision_proxy} ({eps_beats_ultimos_4q}/4 beats recientes)
-[{f1_tend}] Tendencia alcista SMA50>SMA200: {tendencia_alcista} (SMA50: {sma50} | SMA200: {sma200})
-→ RESULTADO F1: [PASA / DESCARTADA — indicar cuál falló]
+[{f1_eps_trim}] EPS trimestral YoY: {eps_trimestral_yoy}% (mínimo ≥25% | preferido ≥40%)
+[{f1_sales}]    Sales trimestral YoY: {sales_trimestral_yoy}% (confirmación ≥25%)
+[{f1_eps_rev}]  EPS Revisions 30d: {eps_revision_proxy} ({eps_revision_30d_pct}%)
+[{f1_anual}]    EPS anual 3 años consecutivos: {eps_anual_crecimientos_3y} | Consistente: {eps_anual_consistente}
+[{f1_tend}]     Tendencia alcista SMA50>SMA200: {tendencia_alcista} (SMA50: {sma50} | SMA200: {sma200})
+→ RESULTADO F1: {resultado_f1}
 
 FILTRO 2 — CALIDAD DEL NEGOCIO
-[{f2_roic}] ROIC proxy (ROE): {roic_proxy}% (mínimo >15%)
-[{f2_margin}] Net Margin: {net_margin}% (mínimo >10%)
-[{f2_fcf}] FCF Yield: {fcf_yield}% | FCF/Net Income: {fcf_net_income_ratio}% (FCF Yield >3% O FCF/NI >80%)
-[{f2_de}] Debt/Equity: {debt_equity} (máximo <1)
-→ RESULTADO F2: X/4 [Excelente=4/4 | Aceptable=3/4 | Cuidado=2/4 | Descartar=0-1/4]
+[{f2_roe}]    ROE: {roic_proxy}% (mínimo ≥17% — O'Neil exacto)
+[{f2_margin}] Net Margin: {net_margin}% (mínimo ≥10%)
+[{f2_fcf}]    FCF Yield: {fcf_yield}% | FCF/Net Income: {fcf_net_income_ratio}%
+[{f2_de}]     Debt/Equity: {debt_equity} (máximo <1)
+              CF vs EPS: {cf_vs_eps_pct}% (O'Neil: ≥20% confirma calidad de earnings)
+→ RESULTADO F2: {f2_score}/4
 
-FILTRO 3 — VALIDACIÓN INSTITUCIONAL
-[{f3_rs}] RS Rating aprox: {rs_rating_aprox}/99 — retorno 1Y: {retorno_1y_ticker}% vs SPY: {retorno_1y_spy}% (mínimo >80)
-[{f3_inst}] Institutional Ownership: {inst_ownership_pct}% (mínimo >40%)
-[{f3_target}] 1Y Price Target Upside: {target_upside_pct}% → Target: ${price_target} (mínimo >30%)
-→ RESULTADO F3: X/3 [Válida=2-3 | Dudosa=1 | No operar=0]
+FILTRO 3 — LIDERAZGO E INSTITUCIONAL
+[{f3_rs}]     RS Rating aprox: {rs_rating_aprox}/99 | Retorno 1Y: {retorno_1y_ticker}% vs SPY: {retorno_1y_spy}% (mínimo ≥85)
+[{f3_inst}]   Institutional Ownership: {inst_ownership_pct}% (mínimo ≥40%)
+[{f3_target}] 1Y Price Target Upside: {target_upside_pct}% → Target: ${price_target} (mínimo ≥30%)
+→ RESULTADO F3: {f3_score}/3
 
-FILTRO 4 — OPERATIVO
-[{f4_avgvol}] Avg Volume 20d: {avg_volume_20d_fmt} (mínimo >1M)
-[{f4_volvol}] Volume hoy: {volume_hoy_fmt} (mínimo >500K)
-[{f4_tend}] Tendencia técnica: SMA50 {sma50} {direcc} SMA200 {sma200}
-→ RESULTADO F4: [OPERABLE / NO OPERAR]
+FILTRO 4 — OPERATIVO Y TÉCNICO
+[{f4_avgvol}]  Avg Volume 20d: {avg_volume_20d_fmt} (mínimo >1M)
+[{f4_vol_hoy}] Volume hoy: {volume_hoy_fmt} (mínimo >500K)
+[{f4_vol_rel}] Volumen vs promedio 50d: {vol_vs_50d_avg_pct}% (O'Neil breakout: ≥50%)
+               Breakout válido: {vol_breakout_valido}
+[{f4_tend}]    SMA50 {sma50} {direcc} SMA200 {sma200}
+               Precio actual: ${precio_actual} | Máx 52W: ${maximo_52w} ({pct_desde_maximo_52w}% desde máx)
+→ RESULTADO F4: {resultado_f4}
+
+AUDITORÍA CUALITATIVA CAN SLIM (solo si pasó F1+F2+F3):
+1. N — ¿Tiene catalizador nuevo + está cerca de nuevos máximos? (dentro del -10%)
+2. L — ¿Es líder de su grupo industrial o rezagada?
+3. Patrón técnico — ¿Cup with Handle / Double Bottom / Flat Base / VCP en formación?
+4. Etapa Minervini — ¿Está en Etapa 2 (avance) o Etapa 3-4 (peligro)?
+Si los datos no son suficientes para el análisis cualitativo, indicarlo explícitamente.
 
 SIZING (cuenta $1,000)
-Precio actual:      ${precio_actual}
-Riesgo 2% = $20
-Stop Loss (−7%):    ${stop_loss}
-Acciones posibles:  {num_acciones} acciones (${capital_usado} capital usado = {pct_capital}% del portafolio)
-Target 1 (+20%):    ${target1}
+Precio actual:        ${precio_actual}
+Stop Loss (−7%):      ${stop_loss}
+Acciones posibles:    {num_acciones} acciones (${capital_usado} = {pct_capital}% del portafolio)
+Target 1 (+20%):      ${target1}
 Target 2 (analistas): ${price_target}
-R/R ratio:          {rr_ratio}x
+R/R ratio:            {rr_ratio}x
+Stop bear market:     ${stop_bear} (−3% para mercados de distribución)
 
-VEREDICTO FINAL: [OPERAR / MONITOREAR / DESCARTAR]
-Razón en 2 líneas máximo: [explicación concisa]
+VEREDICTO FINAL: {veredicto_previo}
+[Confirmar o ajustar basado en auditoría cualitativa. Razón en 2 líneas.]
 
-PRÓXIMA REVISIÓN: [indicar cuándo revisar según contexto]
+PRÓXIMA REVISIÓN: [cuándo y qué verificar]
 """
 
-def construir_prompt(datos: dict) -> str:
-    """Rellena el master prompt con los datos extraídos."""
-
+def construir_prompt(datos: dict, filtros: dict) -> str:
     precio = datos.get("precio_actual", 0) or 0
     stop   = round(precio * 0.93, 2)
+    stop_b = round(precio * 0.97, 2)
     num_acc = int(20 / (precio - stop)) if precio > stop else 0
     capital = round(num_acc * precio, 0)
     pct_cap = round((capital / 1000) * 100, 1)
@@ -233,134 +589,177 @@ def construir_prompt(datos: dict) -> str:
     def fmt_vol(v):
         if v is None: return "N/D"
         if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
-        if v >= 1_000: return f"{v/1_000:.0f}K"
+        if v >= 1_000:     return f"{v/1_000:.0f}K"
         return str(v)
 
-    def check(val, umbral, mayor=True):
-        if val is None: return "?"
-        return "✅" if (val > umbral if mayor else val < umbral) else "❌"
+    def chk(val):
+        return "✅" if val else "❌"
+
+    f2d = filtros.get("f2_detalle", [False, False, False, False])
+    f3d = filtros.get("f3_detalle", [False, False, False])
 
     direcc = ">" if datos.get("tendencia_alcista") else "<"
+
     return MASTER_PROMPT.format(
-        datos_json          = json.dumps(datos, ensure_ascii=False, indent=2),
-        ticker              = datos["ticker"],
-        nombre              = datos.get("nombre_empresa", datos["ticker"]),
-        sector              = datos.get("sector", "N/D"),
-        fecha               = datos["fecha_analisis"],
-
-        # Filtro 1
-        f1_rev              = check(datos.get("revenue_growth_yoy"), 20),
-        f1_eps              = "✅" if datos.get("eps_revision_proxy") == "positivo" else "❌",
-        f1_tend             = "✅" if datos.get("tendencia_alcista") else "❌",
-        revenue_growth_yoy  = datos.get("revenue_growth_yoy", "N/D"),
-        eps_revision_proxy  = datos.get("eps_revision_proxy", "N/D"),
-        eps_beats_ultimos_4q= datos.get("eps_beats_ultimos_4q", "N/D"),
-        tendencia_alcista   = datos.get("tendencia_alcista", "N/D"),
-        sma50               = datos.get("sma50", "N/D"),
-        sma200              = datos.get("sma200", "N/D"),
-
-        # Filtro 2
-        f2_roic             = check(datos.get("roic_proxy"), 15),
-        f2_margin           = check(datos.get("net_margin"), 10),
-        f2_fcf              = "✅" if (datos.get("fcf_yield") or 0) > 3 or (datos.get("fcf_net_income_ratio") or 0) > 80 else "❌",
-        f2_de               = check(datos.get("debt_equity"), 1, mayor=False),
-        roic_proxy          = datos.get("roic_proxy", "N/D"),
-        net_margin          = datos.get("net_margin", "N/D"),
-        fcf_yield           = datos.get("fcf_yield", "N/D"),
-        fcf_net_income_ratio= datos.get("fcf_net_income_ratio", "N/D"),
-        debt_equity         = datos.get("debt_equity", "N/D"),
-
-        # Filtro 3
-        f3_rs               = check(datos.get("rs_rating_aprox"), 80),
-        f3_inst             = check(datos.get("inst_ownership_pct"), 40),
-        f3_target           = check(datos.get("target_upside_pct"), 30),
-        rs_rating_aprox     = datos.get("rs_rating_aprox", "N/D"),
-        retorno_1y_ticker   = datos.get("retorno_1y_ticker", "N/D"),
-        retorno_1y_spy      = datos.get("retorno_1y_spy", "N/D"),
-        inst_ownership_pct  = datos.get("inst_ownership_pct", "N/D"),
-        target_upside_pct   = datos.get("target_upside_pct", "N/D"),
-        price_target        = datos.get("price_target", "N/D"),
-
-        # Filtro 4
-        f4_avgvol           = "✅" if (datos.get("avg_volume_20d") or 0) > 1_000_000 else "❌",
-        f4_volvol           = "✅" if (datos.get("volume_hoy") or 0) > 500_000 else "❌",
-        f4_tend             = "✅" if datos.get("tendencia_alcista") else "❌",
-        avg_volume_20d_fmt  = fmt_vol(datos.get("avg_volume_20d")),
-        volume_hoy_fmt      = fmt_vol(datos.get("volume_hoy")),
-
+        datos_json              = json.dumps(datos, ensure_ascii=False, indent=2, default=str),
+        filtros_json            = json.dumps(filtros, ensure_ascii=False, indent=2, default=str),
+        ticker                  = datos["ticker"],
+        nombre                  = datos.get("nombre_empresa", datos["ticker"]),
+        sector                  = datos.get("sector", "N/D"),
+        industria               = datos.get("industria", "N/D"),
+        fecha                   = datos["fecha_analisis"],
+        # Market Direction
+        f_mercado               = chk(datos.get("mercado_en_distribucion") is False),
+        distribution_days_25d   = datos.get("distribution_days_25d", "N/D"),
+        market_direction_status = datos.get("market_direction_status", "N/D"),
+        # F1
+        f1_eps_trim             = chk(filtros.get("f1_eps_trim")),
+        f1_sales                = chk((datos.get("sales_trimestral_yoy") or 0) >= 25),
+        f1_eps_rev              = chk(filtros.get("f1_eps_rev")),
+        f1_anual                = chk(filtros.get("f1_anual")),
+        f1_tend                 = chk(filtros.get("f1_tendencia")),
+        eps_trimestral_yoy      = datos.get("eps_trimestral_yoy", "N/D"),
+        sales_trimestral_yoy    = datos.get("sales_trimestral_yoy", "N/D"),
+        eps_revision_proxy      = datos.get("eps_revision_proxy", "N/D"),
+        eps_revision_30d_pct    = datos.get("eps_revision_30d_pct", "N/D"),
+        eps_anual_crecimientos_3y = datos.get("eps_anual_crecimientos_3y", []),
+        eps_anual_consistente   = datos.get("eps_anual_consistente", "N/D"),
+        tendencia_alcista       = datos.get("tendencia_alcista", "N/D"),
+        sma50                   = datos.get("sma50", "N/D"),
+        sma200                  = datos.get("sma200", "N/D"),
+        resultado_f1            = "✅ PASA" if filtros.get("pasa_f1") else f"🚫 FALLA — {filtros.get('fallo_en', '')}",
+        # F2
+        f2_roe                  = chk(f2d[0] if f2d else False),
+        f2_margin               = chk(f2d[1] if len(f2d) > 1 else False),
+        f2_fcf                  = chk(f2d[2] if len(f2d) > 2 else False),
+        f2_de                   = chk(f2d[3] if len(f2d) > 3 else False),
+        roic_proxy              = datos.get("roic_proxy", "N/D"),
+        net_margin              = datos.get("net_margin", "N/D"),
+        fcf_yield               = datos.get("fcf_yield", "N/D"),
+        fcf_net_income_ratio    = datos.get("fcf_net_income_ratio", "N/D"),
+        cf_vs_eps_pct           = datos.get("cf_vs_eps_pct", "N/D"),
+        debt_equity             = datos.get("debt_equity", "N/D"),
+        f2_score                = filtros.get("f2_score", 0),
+        # F3
+        f3_rs                   = chk(f3d[0] if f3d else False),
+        f3_inst                 = chk(f3d[1] if len(f3d) > 1 else False),
+        f3_target               = chk(f3d[2] if len(f3d) > 2 else False),
+        rs_rating_aprox         = datos.get("rs_rating_aprox", "N/D"),
+        retorno_1y_ticker       = datos.get("retorno_1y_ticker", "N/D"),
+        retorno_1y_spy          = datos.get("retorno_1y_spy", "N/D"),
+        inst_ownership_pct      = datos.get("inst_ownership_pct", "N/D"),
+        target_upside_pct       = datos.get("target_upside_pct", "N/D"),
+        price_target            = datos.get("price_target", "N/D"),
+        f3_score                = filtros.get("f3_score", 0),
+        # F4
+        f4_avgvol               = chk((datos.get("avg_volume_20d") or 0) >= 1_000_000),
+        f4_vol_hoy              = chk((datos.get("volume_hoy") or 0) >= 500_000),
+        f4_vol_rel              = chk(datos.get("vol_breakout_valido")),
+        f4_tend                 = chk(datos.get("tendencia_alcista")),
+        avg_volume_20d_fmt      = fmt_vol(datos.get("avg_volume_20d")),
+        volume_hoy_fmt          = fmt_vol(datos.get("volume_hoy")),
+        vol_vs_50d_avg_pct      = datos.get("vol_vs_50d_avg_pct", "N/D"),
+        vol_breakout_valido     = datos.get("vol_breakout_valido", "N/D"),
+        maximo_52w              = datos.get("maximo_52w", "N/D"),
+        pct_desde_maximo_52w    = datos.get("pct_desde_maximo_52w", "N/D"),
+        resultado_f4            = "✅ OPERABLE" if filtros.get("pasa_f4") else "⚠️ REVISAR VOLUMEN",
         # Sizing
-        precio_actual       = precio,
-        stop_loss           = stop,
-        num_acciones        = num_acc,
-        capital_usado       = int(capital),
-        pct_capital         = pct_cap,
-        target1             = t1,
-        rr_ratio            = rr,
-        direcc              = direcc,
+        precio_actual           = precio,
+        stop_loss               = stop,
+        stop_bear               = stop_b,
+        num_acciones            = num_acc,
+        capital_usado           = int(capital),
+        pct_capital             = pct_cap,
+        target1                 = t1,
+        rr_ratio                = rr,
+        direcc                  = direcc,
+        veredicto_previo        = filtros.get("veredicto", "N/D"),
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. LLAMADA A CLAUDE API
+# 4. CLAUDE API CON RETRY
 # ══════════════════════════════════════════════════════════════════════════════
 
 def analizar_con_claude(prompt: str, ticker: str) -> str:
-    """Envía los datos a Claude y devuelve el análisis formateado."""
-
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        print("⚠️  Sin ANTHROPIC_API_KEY — mostrando datos crudos sin análisis Claude")
+        print("⚠️  Sin ANTHROPIC_API_KEY — mostrando datos crudos")
         return prompt
 
     print(f"🤖 Analizando {ticker} con Claude...")
     client = anthropic.Anthropic(api_key=api_key)
 
-    mensaje = client.messages.create(
-        model      = "claude-sonnet-4-5",
-        max_tokens = 1000,
-        system     = (
-            "Eres un analista experto en CAN SLIM y Trade Like a Stock Market Wizard. "
-            "Completa el análisis con los datos provistos. "
-            "Sé conciso y directo. No agregues información no solicitada. "
-            "Siempre mantén exactamente el mismo formato de salida."
-        ),
-        messages   = [{"role": "user", "content": prompt}]
-    )
+    for attempt in range(5):
+        try:
+            mensaje = client.messages.create(
+                model      = "claude-sonnet-4-5",
+                max_tokens = 2000,
+                system     = (
+                    "Eres un analista CAN SLIM purista basado en William O'Neil. "
+                    "Aplica los filtros en orden estricto con early exit: "
+                    "si F1 falla, emite DESCARTAR inmediatamente sin analizar F2/F3/F4. "
+                    "Solo para acciones que pasan F1+F2+F3, realiza la auditoría cualitativa: "
+                    "patrón técnico (Cup with Handle, Double Bottom, Flat Base, VCP), "
+                    "etapa de Minervini (1-4), líder vs rezagada en su grupo, "
+                    "y validez del volumen en el punto de pivote. "
+                    "Advierte explícitamente si detectas señales de Etapa 3-4 (trampa para toros). "
+                    "Mantén exactamente el formato solicitado. Sé conciso y directo."
+                ),
+                messages = [{"role": "user", "content": prompt}]
+            )
+            return mensaje.content[0].text
 
-    return mensaje.content[0].text
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529:
+                wait = 2 ** attempt
+                print(f"⏳ API sobrecargada. Reintentando en {wait}s... ({attempt+1}/5)")
+                time.sleep(wait)
+            else:
+                raise
+        except anthropic.APIConnectionError:
+            wait = 2 ** attempt
+            print(f"⏳ Sin conexión. Reintentando en {wait}s... ({attempt+1}/5)")
+            time.sleep(wait)
+
+    raise Exception(f"❌ API sigue fallando para {ticker} después de 5 intentos")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. GUARDAR REPORTE
+# 5. GUARDAR REPORTE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def guardar_reporte(ticker: str, reporte: str):
-    """Guarda el reporte en reports/YYYY-MM-DD/TICKER_reporte.txt"""
-
-    fecha = datetime.now().strftime("%Y-%m-%d")
+def guardar_reporte(ticker: str, reporte: str) -> str:
+    fecha   = datetime.now().strftime("%Y-%m-%d")
     carpeta = f"reports/{fecha}"
     os.makedirs(carpeta, exist_ok=True)
     path = f"{carpeta}/{ticker}_reporte.txt"
-
     with open(path, "w", encoding="utf-8") as f:
         f.write(reporte)
-
     print(f"💾 Reporte guardado: {path}")
     return path
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. MAIN
+# 6. MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     if len(sys.argv) < 2:
-        print("Uso: python3 screener.py TICKER [TICKER2 TICKER3 ...]")
-        print("Ejemplo: python3 screener.py AXON")
+        print("Uso: python3 screener.py TICKER [TICKER2 ...]")
+        print("Ejemplo: python3 screener.py ORLA ERO RELY APP IONQ ALAB")
         sys.exit(1)
 
-    tickers = [t.upper() for t in sys.argv[1:]]
+    tickers    = [t.upper() for t in sys.argv[1:]]
     resultados = []
+
+    # Market Direction se calcula UNA SOLA VEZ para toda la sesión
+    market_data = calcular_market_direction()
+    print(f"\n🌐 Market Direction: {market_data.get('market_direction_status', 'N/D')} "
+          f"({market_data.get('distribution_days_25d', '?')} distribution days)")
+
+    if market_data.get("mercado_en_distribucion"):
+        print("⚠️  ALERTA: Mercado en distribución — O'Neil recomienda no abrir nuevas posiciones")
 
     for ticker in tickers:
         print(f"\n{'='*60}")
@@ -368,28 +767,51 @@ def main():
         print(f"{'='*60}")
 
         try:
-            datos   = extraer_datos(ticker)
-            prompt  = construir_prompt(datos)
-            reporte = analizar_con_claude(prompt, ticker)
-            path    = guardar_reporte(ticker, reporte)
+            datos   = extraer_datos(ticker, market_data)
+            filtros = evaluar_filtros(datos)
 
+            # Early exit: si F1 falla, no llama a Claude con análisis completo
+            if not filtros["pasa_f1"]:
+                reporte = (
+                    f"ANÁLISIS CAN SLIM v2.0 — {ticker}\n"
+                    f"{'='*50}\n"
+                    f"🚫 DESCARTAR — Falla en Filtro 1\n"
+                    f"Razón: {filtros.get('fallo_en', 'N/D')}\n"
+                    f"No se procesa F2/F3/F4.\n"
+                    f"Fecha: {datos['fecha_analisis']}\n"
+                )
+            else:
+                prompt  = construir_prompt(datos, filtros)
+                reporte = analizar_con_claude(prompt, ticker)
+
+            path = guardar_reporte(ticker, reporte)
             print(f"\n{reporte}")
-            from alerts import enviar_telegram
-            enviar_telegram(f"*{ticker}*\n{reporte[:3000]}")
-            resultados.append({"ticker": ticker, "ok": True, "path": path})
+
+            try:
+                from alerts import enviar_telegram
+                if filtros.get("pasa_f3"):
+                    # Pasó F1+F2+F3 → reporte completo
+                    enviar_telegram(f"*{ticker}*\n{reporte[:3000]}")
+                # Si falla F1 → silencio total en Telegram
+            except ImportError:
+                pass  # alerts.py opcional
+
+            resultados.append({"ticker": ticker, "ok": True, "path": path,
+                                "veredicto": filtros.get("veredicto", "N/D")})
 
         except Exception as e:
             print(f"❌ Error procesando {ticker}: {e}")
             resultados.append({"ticker": ticker, "ok": False, "error": str(e)})
 
-    # Resumen si son múltiples tickers
     if len(tickers) > 1:
         print(f"\n{'='*60}")
-        print("  RESUMEN")
+        print("  RESUMEN DE SESIÓN")
+        print(f"  Market: {market_data.get('market_direction_status', 'N/D')}")
         print(f"{'='*60}")
         for r in resultados:
             estado = "✅" if r["ok"] else "❌"
-            print(f"  {estado} {r['ticker']}")
+            veredicto = r.get("veredicto", r.get("error", ""))
+            print(f"  {estado} {r['ticker']:10} {veredicto}")
 
 
 if __name__ == "__main__":
