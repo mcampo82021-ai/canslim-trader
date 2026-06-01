@@ -235,6 +235,7 @@ El plugin oficial de OpenAI está instalado en Claude Code. Permite usar Codex c
 - **Config:** `~/Documents/CAN SLIM/.mcp.json`
 - **Requisitos:** TradingView Desktop abierto + servidor Node corriendo (`node server.js` en el repo del MCP)
 - **Uso principal:** auditoría técnica con datos OHLCV reales — complementa `technical_audit.py` con acceso directo al chart en vivo
+- **IMPORTANTE:** El MCP de TradingView solo funciona desde el terminal de Claude Code (CLI). No está disponible en la interfaz web claude.ai. Para cualquier análisis técnico con TradingView, usar siempre Claude Code.
 
 **Herramientas clave:**
 | Herramienta | Uso en CAN SLIM |
