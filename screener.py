@@ -506,7 +506,13 @@ def evaluar_filtros(datos: dict) -> dict:
     vol_hoy    = datos.get("volume_hoy") or 0
     tendencia4 = datos.get("tendencia_alcista")
 
-    f4 = avg_vol >= 1_000_000 and vol_hoy >= 500_000 and tendencia4
+    precio = datos.get("precio_actual") or 0
+    vol_dolar_avg = avg_vol * precio
+    vol_dolar_hoy = vol_hoy * precio
+    if precio >= 100:
+        f4 = vol_dolar_avg >= 50_000_000 and vol_dolar_hoy >= 25_000_000 and tendencia4
+    else:
+        f4 = avg_vol >= 1_000_000 and vol_hoy >= 500_000 and tendencia4
     resultado["pasa_f4"]  = bool(f4)
     resultado["veredicto"] = "🟢 OPERAR — pendiente auditoría cualitativa" if f4 else "👀 WATCHLIST — volumen insuficiente"
 
