@@ -230,7 +230,7 @@ def rs_line_new_high(
 
     if len(rs_values) < 50:
         return None
-    return rs_values[-1] >= max(rs_values[:-1])
+    return rs_values[-1] >= max(rs_values[-64:-1])
 
 
 def audit_bars(
