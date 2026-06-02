@@ -386,8 +386,12 @@ def extraer_datos(ticker_symbol: str, market_data: dict) -> dict:
         datos["target_upside_pct"] = None
 
     # ── FILTRO 4: Operativo ───────────────────────────────────────────────────
-    datos["avg_volume_20d"] = info.get("averageVolume")
-    datos["volume_hoy"]     = info.get("regularMarketVolume")
+    # Calcular volumen promedio 20d desde historial real (evita datos inconsistentes de yfinance para small caps)
+    if not hist.empty and len(hist) >= 20:
+        datos["avg_volume_20d"] = int(hist["Volume"].tail(20).mean())
+    else:
+        datos["avg_volume_20d"] = info.get("averageVolume")
+    datos["volume_hoy"]     = int(hist["Volume"].iloc[-1]) if not hist.empty else info.get("regularMarketVolume")
     datos["market_cap"]     = market_cap
     datos["nombre_empresa"] = info.get("longName", ticker_symbol)
     datos["sector"]         = info.get("sector", "N/D")

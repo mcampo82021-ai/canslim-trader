@@ -296,6 +296,7 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 | 1 Jun 2026 | Resumen de sesión mostraba `🟢 OPERAR` aunque Claude dijera ESPERAR | Pendiente: parsear veredicto final del reporte Claude |
 | 1 Jun 2026 | NumpyEncoder faltante — JSON serialization fallaba con tipos numpy int64/float64 | NumpyEncoder añadido en screener_sp500.py |
 | 1 Jun 2026 | `rs_line_new_high` usaba lookback 252 días — falsos negativos en acciones líderes cerca del pivot | Lookback reducido a 63 días en technical_audit.py |
+| 2 Jun 2026 | FLXS pasó F4 con volumen 50K — yfinance averageVolume inconsistente para small caps | avg_volume_20d calculado desde historial real en screener.py |
 ---
 
 # ESTADO DEL MERCADO (actualizar al inicio de cada sesión)
