@@ -1,7 +1,7 @@
 """
-phase2_deepseek.py — Auditoría DeepSeek de tickers ESPERAR del screener CAN SLIM.
+phase2_deepseek.py — Auditoría DeepSeek de tickers ESPERAR y VALIDO del screener CAN SLIM.
 
-Lee Ganadores_CAN_SLIM.xlsx, filtra Técnico Veredicto == ESPERAR, enriquece con
+Lee Ganadores_CAN_SLIM.xlsx, filtra Técnico Veredicto in (ESPERAR, VALIDO), enriquece con
 rs_line_new_high y pivot_volume_valid via technical_audit.py, y audita cada uno
 con DeepSeek-chat. Imprime tabla resumen + observaciones.
 """
@@ -33,7 +33,7 @@ Criterios:
 """
 
 
-def load_esperar_tickers() -> list[dict]:
+def load_tickers() -> list[dict]:
     wb = openpyxl.load_workbook(EXCEL_PATH)
     ws = wb.active
     headers = [c.value for c in ws[1]]
@@ -41,17 +41,19 @@ def load_esperar_tickers() -> list[dict]:
     rows = []
     for row in list(ws.rows)[1:]:
         vals = [c.value for c in row]
-        if vals[idx["Técnico Veredicto"]] == "ESPERAR":
+        veredicto = vals[idx["Técnico Veredicto"]]
+        if veredicto in ("ESPERAR", "VALIDO"):
             rows.append({
-                "ticker":         vals[idx["Ticker"]],
-                "empresa":        vals[idx["Empresa"]],
-                "sector":         vals[idx["Sector"]],
-                "precio":         vals[idx["Precio ($)"]],
-                "rs_rating":      vals[idx["RS Rating"]],
-                "pivot":          vals[idx["Pivot ($)"]],
-                "pct_from_pivot": vals[idx["% desde Pivot"]],
-                "stage":          vals[idx["Etapa Minervini"]],
-                "pattern":        vals[idx["Patrón"]],
+                "ticker":            vals[idx["Ticker"]],
+                "empresa":           vals[idx["Empresa"]],
+                "sector":            vals[idx["Sector"]],
+                "precio":            vals[idx["Precio ($)"]],
+                "rs_rating":         vals[idx["RS Rating"]],
+                "pivot":             vals[idx["Pivot ($)"]],
+                "pct_from_pivot":    vals[idx["% desde Pivot"]],
+                "stage":             vals[idx["Etapa Minervini"]],
+                "pattern":           vals[idx["Patrón"]],
+                "tecnico_veredicto": veredicto,
             })
     return rows
 
@@ -61,8 +63,8 @@ def enrich_with_technical(row: dict) -> dict:
         bars = fetch_yfinance_bars(row["ticker"])
         spy_bars = fetch_yfinance_bars("SPY")
         audit = audit_bars(row["ticker"], bars, spy_bars)
-        row["rs_line_new_high"]       = audit.rs_line_new_high
-        row["pivot_volume_valid"]     = audit.pivot_volume_valid
+        row["rs_line_new_high"]        = audit.rs_line_new_high
+        row["pivot_volume_valid"]      = audit.pivot_volume_valid
         row["pivot_volume_vs_50d_pct"] = audit.pivot_volume_vs_50d_pct
     except Exception as exc:
         row["rs_line_new_high"]        = None
@@ -97,8 +99,8 @@ def audit_deepseek(row: dict) -> dict:
 
 def print_table(results: list[dict]) -> None:
     header = (
-        f"{'Ticker':<8} {'Pivot':>7} {'%Pivot':>7} {'RS High':>8} "
-        f"{'Vol OK':>7} {'Pattern':<28} {'Veredicto':<12} {'Puntaje':>7}"
+        f"{'Ticker':<8} {'TV':>8} {'Pivot':>7} {'%Pivot':>7} {'RS High':>8} "
+        f"{'Vol OK':>7} {'Pattern':<28} {'DeepSeek':<12} {'Pts':>5}"
     )
     print("\n" + header)
     print("-" * len(header))
@@ -106,21 +108,33 @@ def print_table(results: list[dict]) -> None:
         row, ds = r["row"], r["deepseek"]
         print(
             f"{row['ticker']:<8} "
-            f"{row['pivot']:>7.2f} "
-            f"{row['pct_from_pivot']:>7.1f} "
+            f"{row.get('tecnico_veredicto','?'):>8} "
+            f"{(row['pivot'] or 0):>7.2f} "
+            f"{(row['pct_from_pivot'] or 0):>7.1f} "
             f"{str(row.get('rs_line_new_high')):>8} "
             f"{str(row.get('pivot_volume_valid')):>7} "
-            f"{row['pattern']:<28} "
+            f"{str(row.get('pattern','?')):<28} "
             f"{ds.get('pre_veredicto', 'ERROR'):<12} "
-            f"{str(ds.get('puntaje', '-')):>7}"
+            f"{str(ds.get('puntaje', '-')):>5}"
         )
 
     print()
+    aprobados  = [r for r in results if r["deepseek"].get("pre_veredicto") == "APROBADO"]
+    revisar    = [r for r in results if r["deepseek"].get("pre_veredicto") == "REVISAR"]
+    rechazados = [r for r in results if r["deepseek"].get("pre_veredicto") == "RECHAZADO"]
+
+    print(f"{'='*60}")
+    print(f"  APROBADOS → Fase 3 MCP : {len(aprobados)}")
+    print(f"  REVISAR → Watchlist     : {len(revisar)}")
+    print(f"  RECHAZADOS              : {len(rechazados)}")
+    print(f"{'='*60}\n")
+
     for r in results:
         row, ds = r["row"], r["deepseek"]
         veredicto = ds.get("pre_veredicto", "ERROR")
-        puntaje = ds.get("puntaje", "-")
-        print(f"[{row['ticker']}] {row['empresa']} — {veredicto} ({puntaje}/100)")
+        puntaje   = ds.get("puntaje", "-")
+        emoji = "🟢" if veredicto == "APROBADO" else "👀" if veredicto == "REVISAR" else "🚫"
+        print(f"{emoji} [{row['ticker']}] {row['empresa']} — {veredicto} ({puntaje}/100)")
         for obs in ds.get("obs", []):
             print(f"  • {obs}")
         for sug in ds.get("sugerencias", []):
@@ -129,14 +143,19 @@ def print_table(results: list[dict]) -> None:
 
 
 if __name__ == "__main__":
-    print("Leyendo tickers ESPERAR desde Ganadores_CAN_SLIM.xlsx...")
-    tickers = load_esperar_tickers()
-    print(f"Encontrados: {[r['ticker'] for r in tickers]}\n")
+    print("Leyendo tickers ESPERAR + VALIDO desde Ganadores_CAN_SLIM.xlsx...")
+    tickers = load_tickers()
+    print(f"Encontrados: {[r['ticker'] for r in tickers]} ({len(tickers)} total)\n")
+
+    if not KEY:
+        print("❌ Falta DEEPSEEK_API_KEY en .env")
+        exit(1)
 
     results = []
     for row in tickers:
         ticker = row["ticker"]
-        print(f"[{ticker}] Obteniendo datos técnicos (yfinance + SPY)...")
+        tv = row.get("tecnico_veredicto", "?")
+        print(f"[{ticker}] ({tv}) Obteniendo datos técnicos...")
         row = enrich_with_technical(row)
         print(f"[{ticker}] Auditando con DeepSeek...")
         try:
@@ -145,7 +164,7 @@ if __name__ == "__main__":
             ds_result = {"pre_veredicto": "ERROR", "puntaje": 0, "obs": [str(exc)], "sugerencias": []}
         results.append({"row": row, "deepseek": ds_result})
         veredicto = ds_result.get("pre_veredicto", "ERROR")
-        puntaje = ds_result.get("puntaje", "-")
+        puntaje   = ds_result.get("puntaje", "-")
         print(f"[{ticker}] → {veredicto} ({puntaje}/100)\n")
 
     print_table(results)
