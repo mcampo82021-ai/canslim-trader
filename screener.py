@@ -785,7 +785,7 @@ def main():
             datos   = extraer_datos(ticker, market_data)
             filtros = evaluar_filtros(datos)
 
-            # Early exit: si F1 falla, no llama a Claude con análisis completo
+            # Early exit en cascada — Claude solo se llama si pasa F1+F2+F3+F4
             if not filtros["pasa_f1"]:
                 reporte = (
                     f"ANÁLISIS CAN SLIM v2.0 — {ticker}\n"
@@ -793,6 +793,32 @@ def main():
                     f"🚫 DESCARTAR — Falla en Filtro 1\n"
                     f"Razón: {filtros.get('fallo_en', 'N/D')}\n"
                     f"No se procesa F2/F3/F4.\n"
+                    f"Fecha: {datos['fecha_analisis']}\n"
+                )
+            elif not filtros["pasa_f2"]:
+                reporte = (
+                    f"ANÁLISIS CAN SLIM v2.0 — {ticker}\n"
+                    f"{'='*50}\n"
+                    f"🚫 DESCARTAR — Falla en Filtro 2\n"
+                    f"Razón: {filtros.get('fallo_en', 'N/D')} ({filtros.get('f2_score', 0)}/4 criterios de calidad)\n"
+                    f"No se procesa F3/F4.\n"
+                    f"Fecha: {datos['fecha_analisis']}\n"
+                )
+            elif not filtros["pasa_f3"]:
+                reporte = (
+                    f"ANÁLISIS CAN SLIM v2.0 — {ticker}\n"
+                    f"{'='*50}\n"
+                    f"👀 WATCHLIST — Falla en Filtro 3\n"
+                    f"Razón: {filtros.get('fallo_en', 'N/D')} ({filtros.get('f3_score', 0)}/3 validación institucional)\n"
+                    f"No se procesa F4.\n"
+                    f"Fecha: {datos['fecha_analisis']}\n"
+                )
+            elif not filtros["pasa_f4"]:
+                reporte = (
+                    f"ANÁLISIS CAN SLIM v2.0 — {ticker}\n"
+                    f"{'='*50}\n"
+                    f"👀 WATCHLIST — Falla en Filtro 4\n"
+                    f"Razón: volumen insuficiente (avg_20d={datos.get('avg_volume_20d', 'N/D')}, hoy={datos.get('volume_hoy', 'N/D')})\n"
                     f"Fecha: {datos['fecha_analisis']}\n"
                 )
             else:
