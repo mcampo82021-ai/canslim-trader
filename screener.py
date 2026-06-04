@@ -580,8 +580,8 @@ FILTRO 3 — LIDERAZGO E INSTITUCIONAL
 → RESULTADO F3: {f3_score}/3
 
 FILTRO 4 — OPERATIVO Y TÉCNICO
-[{f4_avgvol}]  Avg Volume 20d: {avg_volume_20d_fmt} (mínimo >1M)
-[{f4_vol_hoy}] Volume hoy: {volume_hoy_fmt} (mínimo >500K)
+[{f4_avgvol}]  Avg Volume 20d: {avg_volume_20d_fmt} (piso: mid≥500K / small≥150K / micro≥75K)
+[{f4_vol_hoy}] Volume hoy: {volume_hoy_fmt} | RVOL: {rvol}x (≥1.4x confirma breakout)
 [{f4_vol_rel}] Volumen vs promedio 50d: {vol_vs_50d_avg_pct}% (O'Neil breakout: ≥50%)
                Breakout válido: {vol_breakout_valido}
 [{f4_tend}]    SMA50 {sma50} {direcc} SMA200 {sma200}
@@ -609,6 +609,19 @@ VEREDICTO FINAL: {veredicto_previo}
 
 PRÓXIMA REVISIÓN: [cuándo y qué verificar]
 """
+
+def _chk_liquidez(datos: dict) -> str:
+    mc  = datos.get("market_cap") or 0
+    avg = datos.get("avg_volume_20d") or 0
+    hoy = datos.get("volume_hoy") or 0
+    if mc >= 2_000_000_000:
+        ok = avg >= 500_000 and hoy >= 200_000
+    elif mc >= 500_000_000:
+        ok = avg >= 150_000 and hoy >= 75_000
+    else:
+        ok = avg >= 75_000 and hoy >= 30_000
+    return "✅" if ok else "❌"
+
 
 def construir_prompt(datos: dict, filtros: dict) -> str:
     precio = datos.get("precio_actual", 0) or 0
@@ -686,12 +699,13 @@ def construir_prompt(datos: dict, filtros: dict) -> str:
         price_target            = datos.get("price_target", "N/D"),
         f3_score                = filtros.get("f3_score", 0),
         # F4
-        f4_avgvol               = chk((datos.get("avg_volume_20d") or 0) >= 1_000_000),
-        f4_vol_hoy              = chk((datos.get("volume_hoy") or 0) >= 500_000),
+        f4_avgvol               = _chk_liquidez(datos),
+        f4_vol_hoy              = "✅" if (datos.get("rvol") or 0) >= 1.4 else ("⚠️" if (datos.get("rvol") or 0) >= 0.8 else "❌"),
         f4_vol_rel              = chk(datos.get("vol_breakout_valido")),
         f4_tend                 = chk(datos.get("tendencia_alcista")),
         avg_volume_20d_fmt      = fmt_vol(datos.get("avg_volume_20d")),
         volume_hoy_fmt          = fmt_vol(datos.get("volume_hoy")),
+        rvol                    = datos.get("rvol", "N/D"),
         vol_vs_50d_avg_pct      = datos.get("vol_vs_50d_avg_pct", "N/D"),
         vol_breakout_valido     = datos.get("vol_breakout_valido", "N/D"),
         maximo_52w              = datos.get("maximo_52w", "N/D"),
