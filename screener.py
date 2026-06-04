@@ -392,6 +392,7 @@ def extraer_datos(ticker_symbol: str, market_data: dict) -> dict:
     else:
         datos["avg_volume_20d"] = info.get("averageVolume")
     datos["volume_hoy"]     = int(hist["Volume"].iloc[-1]) if not hist.empty else info.get("regularMarketVolume")
+    datos["rvol"] = round(datos["volume_hoy"] / datos["avg_volume_20d"], 2) if (datos.get("avg_volume_20d") or 0) > 0 else None
     datos["market_cap"]     = market_cap
     datos["nombre_empresa"] = info.get("longName", ticker_symbol)
     datos["sector"]         = info.get("sector", "N/D")
@@ -506,15 +507,27 @@ def evaluar_filtros(datos: dict) -> dict:
     vol_hoy    = datos.get("volume_hoy") or 0
     tendencia4 = datos.get("tendencia_alcista")
 
-    precio = datos.get("precio_actual") or 0
-    vol_dolar_avg = avg_vol * precio
-    vol_dolar_hoy = vol_hoy * precio
-    if precio >= 100:
-        f4 = vol_dolar_avg >= 50_000_000 and vol_dolar_hoy >= 25_000_000 and tendencia4
+    market_cap = datos.get("market_cap") or 0
+    if market_cap >= 2_000_000_000:
+        piso_avg, piso_hoy = 500_000, 200_000
+    elif market_cap >= 500_000_000:
+        piso_avg, piso_hoy = 150_000, 75_000
     else:
-        f4 = avg_vol >= 1_000_000 and vol_hoy >= 500_000 and tendencia4
-    resultado["pasa_f4"]  = bool(f4)
-    resultado["veredicto"] = "🟢 OPERAR — pendiente auditoría cualitativa" if f4 else "👀 WATCHLIST — volumen insuficiente"
+        piso_avg, piso_hoy = 75_000, 30_000
+
+    liquidez_ok = avg_vol >= piso_avg and vol_hoy >= piso_hoy
+    rvol        = datos.get("rvol") or 0
+    rvol_ok     = rvol >= 1.4
+
+    f4 = liquidez_ok and tendencia4
+    resultado["pasa_f4"]   = bool(f4)
+    resultado["rvol_ok"]   = rvol_ok
+    if f4 and rvol_ok:
+        resultado["veredicto"] = "🟢 OPERAR — pendiente auditoría cualitativa"
+    elif f4 and not rvol_ok:
+        resultado["veredicto"] = "👀 WATCHLIST — liquidez OK pero RVOL bajo (esperar volumen)"
+    else:
+        resultado["veredicto"] = "👀 WATCHLIST — liquidez insuficiente"
 
     return resultado
 
