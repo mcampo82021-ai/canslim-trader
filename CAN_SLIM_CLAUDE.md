@@ -299,6 +299,7 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 | 2 Jun 2026 | FLXS pasó F4 con volumen 50K — yfinance averageVolume inconsistente para small caps | avg_volume_20d calculado desde historial real en screener.py |
 | 2 Jun 2026 | screener.py llamaba a Claude aunque fallara F2/F3/F4 — tokens desperdiciados | Early exit en cascada para F2/F3/F4 en main() |
 | 2 Jun 2026 | F4 rechazaba high-price stocks por volumen en unidades (AGX $663 = 285K acc = $188M/día) | Fix: umbral en dólares para precio ≥ $100 en screener.py |
+| 4 Jun 2026 | F4 rechazaba small/micro caps por umbrales absolutos (avg>1M, hoy>500K) | Pisos escalonados por market cap (mid≥500K / small≥150K / micro≥75K) + RVOL como señal de calidad de breakout. Aplicado en screener.py y screener_v1.py |
 
 ---
 
@@ -350,3 +351,4 @@ Criterio general: RS ≥ 85 + mercado alcista con FTD confirmado → pasar a Dee
 - [ ] Monitorear AGX post-earnings 4 junio
 - [ ] Completar columna EPS Beats en `CAN_SLIM_Tracker.xlsx`
 - [ ] Monitorear AUPH semanalmente — cuando RS > 85 → DeepSeek Fase 2
+- [ ] Integrar phase2_deepseek.py en screener_sp500.py para que el flujo F1→F2→F3→F4→DeepSeek→Claude sea automático sin intervención manual
