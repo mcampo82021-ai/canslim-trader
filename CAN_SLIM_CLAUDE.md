@@ -129,8 +129,22 @@ git push
 git pull
 ```
 
----
 
+## Google Sheets — Sync Automático
+
+**Sheet live:** https://docs.google.com/spreadsheets/d/1xxg81AY0DULhUcyRYZx2-gk5oByXe_ITXscMKR8w4Ns
+
+**Credenciales:** `~/.config/google/canslim_credentials.json` (OAuth — proyecto CAN SLIM TRACKER)
+**Token:** `~/.config/google/canslim_token.json` (se renueva automáticamente)
+**Script:** `~/Documents/CAN SLIM/sync_to_sheets.py`
+
+El sync se ejecuta automáticamente al finalizar cada sesión del screener.
+Para sync manual:
+```bash
+python3 sync_to_sheets.py
+```
+
+---
 # METODOLOGÍA — FILTROS CUANTITATIVOS (FASE 1)
 
 ## Filtro 1 — OBLIGATORIO (falla uno → DESCARTAR, early exit inmediato)
