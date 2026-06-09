@@ -317,10 +317,10 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 
 | Indicador | Valor | Interpretación |
 |---|---|---|
-| Distribution Days (25 sesiones) | 4/5 | ⚠️ Límite superior — vigilar día 5 |
+| Distribution Days (25 sesiones) | 5/5 | 🔴 Techo alcanzado — no abrir posiciones |
 | Follow-Through Day (FTD) | No confirmado | Sin señal institucional de retoma |
 | Market Direction | ALCISTA ✅ | En el límite |
-| Acción recomendada | Precaución | No abrir posiciones hasta FTD confirmado |
+| Acción recomendada | ESPERAR | 5 dist. days confirmados — cero entradas hasta FTD |
 
 ---
 
@@ -328,8 +328,7 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 
 | Ticker | RS | Precio | Pivot | Distancia | Estado |
 |---|---|---|---|---|---|
-| COCO | 93 | 75.07 | 79.70 | -5.8% | Formando VCP — volumen seco ✅ |
-| YOU | 99 | 57.43 | 62.73 | -8.4% | Breakout rechazado — esperar nueva base |
+| YOU | — | — | — | — | 👀 WATCHLIST sin análisis — esperar FTD |
 | AGX | 99 | 645.67 | 748.50 | -13.7% | Earnings 4 Jun — no entrar antes |
 | VISN | 99 | 12.31 | 13.22 | -6.8% | ⚠️ Revisar: EPS/Revenue en declive YoY |
 | AUPH | 82 | — | — | — | Cuando RS > 85 → analizar con DeepSeek |
