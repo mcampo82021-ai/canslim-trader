@@ -898,3 +898,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+    import subprocess, os
+    sync_script = os.path.expanduser("~/Documents/CAN SLIM/sync_to_sheets.py")
+    if os.path.exists(sync_script):
+        print("\n📤 Sincronizando con Google Sheets...")
+        subprocess.run(["python3", sync_script])
