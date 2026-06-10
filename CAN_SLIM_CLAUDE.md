@@ -165,11 +165,17 @@ python3 sync_to_sheets.py
 - FCF Yield > 3% O FCF/Net Income > 80%
 - Debt/Equity < 1
 
-## Filtro 3 — Validación institucional (mínimo 2/3)
+## Filtro 3 — Validación institucional (RS + Inst obligatorios, upside señal blanda)
 
-- RS Rating ≥ 85 (proxy: retorno 1Y vs SPY)
-- Institutional Ownership ≥ 40%
-- 1Y Target Upside ≥ 30%
+- RS Rating ≥ 85 — OBLIGATORIO
+- Institutional Ownership ≥ 40% — OBLIGATORIO
+- Target Upside ≥ 30% — señal blanda (no elimina, genera advertencia si < 30%)
+
+Lógica: pasa F3 si RS ≥85 AND Inst ≥40.
+Si upside < 30%: nota automática "⚠️ criterio duro no cumplido — analistas posiblemente rezagados".
+
+Razón del cambio (10 Jun 2026): analistas rezagan targets post-rally en stocks RS 99.
+Upside negativo o bajo no refleja debilidad fundamental sino actualización tardía de Wall St.
 
 ## Filtro 4 — Operativo + Auditoría Técnica Real
 
@@ -314,6 +320,7 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 | 2 Jun 2026 | screener.py llamaba a Claude aunque fallara F2/F3/F4 — tokens desperdiciados | Early exit en cascada para F2/F3/F4 en main() |
 | 2 Jun 2026 | F4 rechazaba high-price stocks por volumen en unidades (AGX $663 = 285K acc = $188M/día) | Fix: umbral en dólares para precio ≥ $100 en screener.py |
 | 4 Jun 2026 | F4 rechazaba small/micro caps por umbrales absolutos (avg>1M, hoy>500K) | Pisos escalonados por market cap (mid≥500K / small≥150K / micro≥75K) + RVOL como señal de calidad de breakout. Aplicado en screener.py y screener_v1.py |
+| 10 Jun 2026 | F3 rechazaba líderes RS 99 por targets de analistas rezagados post-rally | Upside pasa a señal blanda — RS+Inst son los criterios obligatorios |
 
 ---
 
