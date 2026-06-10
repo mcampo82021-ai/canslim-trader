@@ -231,19 +231,26 @@ def pasa_f2(datos: dict) -> tuple[bool, int, list]:
     return score >= 3, score, criterios
 
 
-def pasa_f3(datos: dict) -> tuple[bool, int, list]:
-    """F3: Validación institucional — mínimo 2/3. Retorna (pasa, score, detalle)."""
+def pasa_f3(datos: dict) -> tuple[bool, int, list, list]:
+    """F3: Validación institucional — pasa si RS≥85 AND inst≥40. Retorna (pasa, score, detalle, notas)."""
     rs     = datos.get("rs_rating_aprox")
     inst   = datos.get("inst_ownership_pct")
     upside = datos.get("target_upside_pct")
 
-    criterios = [
-        rs     is not None and rs     >= 85,
-        inst   is not None and inst   >= 40,
-        upside is not None and upside >= 30,
-    ]
-    score = sum(criterios)
-    return score >= 2, score, criterios
+    ok_rs     = rs is not None and rs >= 85
+    ok_inst   = inst is not None and inst >= 40
+    ok_upside = upside is not None and upside >= 30
+
+    pasa = ok_rs and ok_inst
+    score = sum([ok_rs, ok_inst, ok_upside])
+    criterios = [ok_rs, ok_inst, ok_upside]
+
+    notas_f3 = []
+    if pasa and not ok_upside:
+        upside_str = f"{upside:.1f}%" if upside is not None else "N/D"
+        notas_f3.append(f"⚠️ Upside {upside_str} < 30% — criterio duro no cumplido (analistas posiblemente rezagados)")
+
+    return pasa, score, criterios, notas_f3
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -581,7 +588,7 @@ def main():
                 continue
 
             # ── F3 ────────────────────────────────────────────────────────────
-            ok_f3, score_f3, _ = pasa_f3(datos)
+            ok_f3, score_f3, _, notas_f3 = pasa_f3(datos)
             if not ok_f3:
                 desc_f3 += 1
                 print(f"→ 🚫 F3: {score_f3}/3 | RS:{datos.get('rs_rating_aprox')} Inst:{datos.get('inst_ownership_pct')} Up:{datos.get('target_upside_pct')}")
@@ -589,6 +596,9 @@ def main():
                 guardar_progreso(progreso)
                 time.sleep(PAUSA_ENTRE_TICKERS)
                 continue
+
+            for nota in notas_f3:
+                print(f"   {nota}")
 
             # ── F1+F2+F3 OK → F4 technical_audit ─────────────────────────────
             print(f"→ ✅ F1+F2({score_f2}/4)+F3({score_f3}/3) — ejecutando auditoría técnica...")

@@ -486,21 +486,25 @@ def evaluar_filtros(datos: dict) -> dict:
     inst      = datos.get("inst_ownership_pct")
     upside    = datos.get("target_upside_pct")
 
-    f3 = [
-        rs is not None and rs >= 85,         # O'Neil: mínimo 85
-        inst is not None and inst >= 40,
-        upside is not None and upside >= 30,
-    ]
+    ok_rs     = rs is not None and rs >= 85
+    ok_inst   = inst is not None and inst >= 40
+    ok_upside = upside is not None and upside >= 30
+
+    f3 = [ok_rs, ok_inst, ok_upside]
     resultado["f3_score"]   = sum(f3)
     resultado["f3_detalle"] = f3
-    resultado["pasa_f3"]    = sum(f3) >= 2
+    resultado["pasa_f3"]    = ok_rs and ok_inst
+
+    notas_f3 = []
+    if resultado["pasa_f3"] and not ok_upside:
+        upside_str = f"{upside:.1f}%" if upside is not None else "N/D"
+        notas_f3.append(f"⚠️ Upside {upside_str} < 30% — criterio duro no cumplido (analistas posiblemente rezagados)")
+    resultado["notas_f3"] = notas_f3
 
     if not resultado["pasa_f3"]:
         resultado["fallo_en"] = f"F3: solo {sum(f3)}/3 validación institucional"
         resultado["veredicto"] = "👀 WATCHLIST"
         return resultado
-
-    resultado["pasa_f3"] = True
 
     # ── FILTRO 4 ──────────────────────────────────────────────────────────────
     avg_vol    = datos.get("avg_volume_20d") or 0
