@@ -349,13 +349,17 @@ Si los fundamentales son fuertes pero la acción está en Etapa 3 o 4, emitir **
 
 | Ticker | RS | Precio | Pivot | Distancia | Estado |
 |---|---|---|---|---|---|
-| YOU | — | — | — | — | 👀 WATCHLIST sin análisis — esperar FTD |
-| AGX | 99 | 645.67 | 748.50 | -13.7% | Earnings 4 Jun — no entrar antes |
-| VISN | 99 | 12.31 | 13.22 | -6.8% | ⚠️ Revisar: EPS/Revenue en declive YoY |
-| AUPH | 82 | — | — | — | Cuando RS > 85 → analizar con DeepSeek |
-| PAYS | 71 | — | — | — | Cuando RS > 85 Y volumen > 1M |
-| INOD | — | 116.80 | ~60 | +97% | WATCHLIST — sobreextendido, esperar pullback $85-95 |
-| PARR | — | 57.51 | — | -16.9% | WATCHLIST — bajo SMA50, volumen colapsado |
+| COCO | 92 | 78.65 | 79.23 | -0.7% | 🥇 Candidato #1 — VCP maduro, opciones 14x, RS Rank 100% — esperar FTD |
+| RSI | 86 | 25.39 | 29.24 | -13.2% | 👀 Stage 2, VCP formando, opciones alcistas |
+| KRYS | 99 | 298.1 | 319.48 | -6.7% | ⚠️ Opciones bajistas (ratio 0.14x) — bajar prioridad |
+| AGX | 99 | 646.89 | 748.50 | -13.6% | 👀 Stage 2 impecable — esperar nueva base post-earnings |
+| INOD | 99 | 104.72 | ~130 | -19.4% | 👀 Breakout base 18 meses — pullback normal, opciones 15.93x alcistas |
+| GOOGL | 97 | 376.37 | 408.61 | -7.9% | 👀 Stage 2, DeepSeek REVISAR |
+| AMD | 99 | 510.13 | 527.2 | -3.2% | 👀 Sin análisis detallado |
+| YOU | 99 | 57.43 | 62.73 | -8.4% | 👀 Sin análisis detallado |
+| NVDA | 67 | 224.36 | 236.54 | -5.1% | 👀 RS bajo — monitorear |
+| MYRG | 99 | 449.85 | 484.71 | -7.2% | 👀 Sin análisis detallado |
+| LPG | 91 | 41.31 | 48.12 | -14.2% | 🚫 Stage 3 confirmado CDP — descartar |
 
 Criterio general: RS ≥ 85 + mercado alcista con FTD confirmado → pasar a DeepSeek Fase 2.
 
@@ -363,7 +367,17 @@ Criterio general: RS ≥ 85 + mercado alcista con FTD confirmado → pasar a Dee
 
 # TAREAS PENDIENTES
 
-- [ ] Crear `phase2_deepseek.py` e integrarlo en `screener_sp500.py`
+- [x] Crear `phase2_deepseek.py` e integrarlo en `screener_sp500.py`
+- [x] Configurar Google Sheets sync automático
+- [x] Integrar Tradier API para flujo de opciones
+- [x] Crear `vcp_scanner.py` via CDP
+- [x] Integrar `carlamHS/vcp_screener` para Trend Template Minervini
+- [ ] Fix `vcp_scanner.py` — integrar watchlist completa y alerta automática
+- [ ] Integrar `options_flow.py` en flujo diario automático
+- [ ] Esperar FTD → entrar COCO en pivot $79.23 con volumen ≥40%
+- [ ] Monitorear INOD — esperar base 6-8 semanas en $95-110
+- [ ] Actualizar LPG en tracker → DESCARTAR (Stage 3 CDP confirmado)
+- [ ] Correr screener masivo `--universo ambos` cuando mercado confirme FTD
 - [ ] Crear `phase3_claude_mcp.py` para generar prompt estructurado
 - [ ] Fix: parsear veredicto final de Claude en `screener.py` para que el resumen de sesión sea correcto
 - [ ] Correr screener masivo completo v3.0 `--universo ambos` (~2,500 tickers)
